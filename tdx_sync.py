@@ -178,18 +178,25 @@ class TdxBlockSync:
 
     # ------------------------------------------------------------ 导出
     def export_block(self, codes: Iterable[str], block_name: str,
-                     overwrite: bool = True) -> Tuple[int, str]:
+                     overwrite: bool = True,
+                     cfg_name: Optional[str] = None) -> Tuple[int, str]:
         """把代码列表导出为通达信自定义板块。
 
         - codes: 6 位代码可迭代（市场位自动推断）
-        - block_name: 板块名。⚠️ TDX 上限 8 字节 GBK（4 个汉字 / 8 个字母数字），
-          超长部分会被截断（TDX 自身限制，非本模块限制）
+        - block_name: 板块名（用作 .blk 文件名 + cfg filename 70字节字段）。
+          超长会被截断（70字节 GBK 限制）
+        - cfg_name: cfg 8字节 name 字段值（v0.8.16 新增）。不传则用 block_name
+          截断到 8 字节（可能丢字）。建议传一个能装进 8 字节的短名
         - overwrite: True=覆盖同名板块；False=追加到已有内容后
 
         返回 (写入条数, 板块文件路径)。
         """
         safe_name = "".join(c for c in block_name
                             if c not in '\\/:*?"<>|').strip() or "程序选股"
+        # v0.8.16：cfg name 字段用独立参数 (用户友好短名, ≤8字节)
+        #           cfg filename 字段用完整名 (70字节内, 保留完整信息)
+        safe_cfg_name = "".join(c for c in (cfg_name or safe_name)
+                                if c not in '\\/:*?"<>|').strip() or safe_name
         # v0.8.10：不再截断——完整名用于 .blk 文件名与 cfg 的 70 字节 filename 字段，
         # cfg 的 8 字节 name 字段在 _register_block 里仍截断（TDX 文件格式限制）。
         path = self.block_path(safe_name)
@@ -201,16 +208,22 @@ class TdxBlockSync:
             existing = read_blk(path)
             n = write_blk(path, existing + stocks)
         # 注册到 blocknew.cfg（已存在同名则跳过注册）
-        self._register_block(safe_name)
+        # v0.8.16: 传独立的 cfg_name 用作 8字节 name 字段
+        self._register_block(safe_cfg_name, safe_name)
         return n, path
 
-    def _register_block(self, block_name: str) -> None:
+    def _register_block(self, block_name: str, filename: str = None) -> None:
         """把板块追加注册到 blocknew.cfg（已存在同名则跳过）。
+
+        block_name: 写入 cfg 8字节 name 字段（短名, TDX 显示用）
+        filename: 写入 cfg 70字节 filename 字段（完整名, 默认 = block_name）
 
         直接扫描 cfg 二进制记录（不走 list_blocks 的目录回退路径），
         避免 cfg 不存在时 list_blocks 因回退到目录枚举而误判为"已注册"。
         """
         gbkc = "gbk"
+        if filename is None:
+            filename = block_name
         data = b""
         if os.path.exists(self.cfg_path):
             with open(self.cfg_path, "rb") as f:
@@ -219,7 +232,7 @@ class TdxBlockSync:
                 rec = data[off:off + CFG_RECORD_SIZE]
                 name = rec[:NAME_FIELD].decode(gbkc, errors="ignore").rstrip("\x00 ").strip()
                 fname = rec[50:CFG_RECORD_SIZE].decode(gbkc, errors="ignore").rstrip("\x00 ").strip()
-                if name == block_name or fname == block_name:
+                if name == block_name or fname == filename:
                     return  # cfg 中已注册
         name_b = block_name.encode(gbkc)[:NAME_FIELD].ljust(NAME_FIELD, b"\x00")
         type_b = b"\x00" * TYPE_FIELD
@@ -229,7 +242,7 @@ class TdxBlockSync:
         #   10-49 40 字节 0x00 保留区
         #   50-119 文件名（左对齐，0x00 填充，不带 .blk 后缀）
         reserved = b"\x00" * 40
-        fname_b = block_name.encode(gbkc)[:70].ljust(70, b"\x00")
+        fname_b = filename.encode(gbkc)[:70].ljust(70, b"\x00")
         record = name_b + type_b + reserved + fname_b
         # 备份后写入
         try:

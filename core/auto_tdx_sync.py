@@ -180,10 +180,12 @@ def auto_sync_codes_to_tdx(db, strategy_name: str, codes: List[str],
                 tdx_alias = None
         # v0.8.13: TDX cfg name 字段(8 字节 GBK 硬限制)用短名, .blk 文件名/cfg filename(70 字节)
         # 用完整日期格式, 便于文件夹按字母序排列时同日期板块自然聚合
-        short_name = make_block_name(strategy_name, date, alias=tdx_alias)  # TDX 板块管理里显示
-        filename = make_block_filename(strategy_name, date)  # .blk 文件名 + cfg filename
+        short_name = make_block_name(strategy_name, date, alias=tdx_alias)  # TDX cfg name 字段 (8字节 GBK)
+        filename = make_block_filename(strategy_name, date)  # .blk 文件名 + cfg filename 字段 (70字节)
         sync = TdxBlockSync(tdx_root)
-        n, path = sync.export_block(clean_codes, filename, overwrite=True)
+        # v0.8.16: 关键修复! cfg_name 用 short_name (8字节短名, TDX 面板显示),
+        #           filename 字段用完整 filename (70字节, 保留日期+策略名)
+        n, path = sync.export_block(clean_codes, filename, overwrite=True, cfg_name=short_name)
         msg = (f"✅ 同步 {n} 只到通达信板块「{short_name}」\n"
                f"   路径: {path}\n   TDX 根目录: {tdx_root}")
         return True, msg
