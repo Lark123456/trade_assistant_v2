@@ -1,0 +1,101 @@
+{
+  "昂利康_经典B1缩量回踩": {
+    "code": "002940",
+    "name": "昂利康_经典B1缩量回踩",
+    "strategy": "B1回踩接力",
+    "start": "2026-07-29",
+    "end": "2026-08-28",
+    "len_days": 23,
+    "created_at": "2026-08-28T00:30:38",
+    "_feature_version": 2,
+    "_npz_key": "t0"
+  },
+  "澄天伟业_经典B1缩量回踩": {
+    "code": "300689",
+    "name": "澄天伟业_经典B1缩量回踩",
+    "strategy": "B1回踩接力",
+    "start": "2025-04-25",
+    "end": "2025-07-18",
+    "len_days": 39,
+    "created_at": "2026-08-16T17:52:43",
+    "_feature_version": 2,
+    "_npz_key": "t1"
+  },
+  "方正科技_经典B1缩量回踩": {
+    "code": "600601",
+    "name": "方正科技_经典B1缩量回踩",
+    "strategy": "B1回踩接力",
+    "start": "2025-05-27",
+    "end": "2025-07-23",
+    "len_days": 41,
+    "created_at": "2026-08-17T22:18:48",
+    "_feature_version": 2,
+    "_npz_key": "t2"
+  },
+  "国轩高科_经典B1缩量回踩": {
+    "code": "002074",
+    "name": "国轩高科_经典B1缩量回踩",
+    "strategy": "B1回踩接力",
+    "start": "2025-04-28",
+    "end": "2025-08-04",
+    "len_days": 49,
+    "created_at": "2026-08-17T22:36:44",
+    "_feature_version": 2,
+    "_npz_key": "t3"
+  },
+  "光电股份_经典B1缩量回踩": {
+    "code": "600184",
+    "name": "光电股份_经典B1缩量回踩",
+    "strategy": "B1回踩接力",
+    "start": "2025-04-29",
+    "end": "2025-06-12",
+    "len_days": 29,
+    "created_at": "2026-08-17T22:51:14",
+    "_feature_version": 2,
+    "_npz_key": "t4"
+  },
+  "华纳药厂_经典B1缩量回踩": {
+    "code": "688799",
+    "name": "华纳药厂_经典B1缩量回踩",
+    "strategy": "B1回踩接力",
+    "start": "2025-04-15",
+    "end": "2025-05-12",
+    "len_days": 17,
+    "created_at": "2026-08-17T22:52:32",
+    "_feature_version": 2,
+    "_npz_key": "t5"
+  },
+  "新翰新材_经典B1缩量回踩": {
+    "code": "301076",
+    "name": "新翰新材_经典B1缩量回踩",
+    "strategy": "B1回踩接力",
+    "start": "2025-06-20",
+    "end": "2025-08-01",
+    "len_days": 31,
+    "created_at": "2026-08-17T23:10:04",
+    "_feature_version": 2,
+    "_npz_key": "t6"
+  },
+  "野马电池_经典B1缩量回踩": {
+    "code": "605378",
+    "name": "野马电池_经典B1缩量回踩",
+    "strategy": "B1回踩接力",
+    "start": "2025-05-15",
+    "end": "2025-07-31",
+    "len_days": 55,
+    "created_at": "2026-08-17T23:11:19",
+    "_feature_version": 2,
+    "_npz_key": "t7"
+  },
+  "微芯生物_经典B1缩量回踩": {
+    "code": "688321",
+    "name": "微芯生物_经典B1缩量回踩",
+    "strategy": "B1回踩接力",
+    "start": "2025-05-27",
+    "end": "2025-06-30",
+    "len_days": 24,
+    "created_at": "2026-08-17T23:12:28",
+    "_feature_version": 2,
+    "_npz_key": "t8"
+  }
+}

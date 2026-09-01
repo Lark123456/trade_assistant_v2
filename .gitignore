@@ -1,0 +1,32 @@
+# 1. 忽略 Python 虚拟环境 (体积巨大，绝对不能上传)
+.venv/
+venv/
+env/
+ENV/
+
+# 2. 忽略 Python 编译缓存与临时文件
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+
+# 3. 忽略本地敏感密钥与配置文件 (保护个人 Webhook / Bark Key)
+.env
+config_private.json
+*.pem
+
+# 4. 忽略运行日志与系统临时文件
+logs/
+*.log
+.DS_Store
+Thumbs.db
+
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+
+# 5. 忽略临时测试目录
+_multi_test_tmp/
+__smoke_v812/
