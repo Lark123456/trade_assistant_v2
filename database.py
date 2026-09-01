@@ -438,6 +438,60 @@ class Database:
             else:
                 cur.execute("DELETE FROM tdx_imports WHERE code=?", (code,))
 
+    def count_calendar_day(self, day):
+        """清空前的预统计：返回某日期在各表里的条目数.
+
+        day: 'YYYY-MM-DD'. 用于清空前的确认对话框预览.
+        """
+        with self._cursor() as cur:
+            n_scan = cur.execute(
+                "SELECT COUNT(*) c FROM scan_history "
+                "WHERE date(scan_time)=? OR trade_date=?",
+                (day, day)).fetchone()["c"]
+            n_watch = cur.execute(
+                "SELECT COUNT(*) c FROM watch_pool WHERE add_date=?",
+                (day,)).fetchone()["c"]
+            n_tdx = cur.execute(
+                "SELECT COUNT(*) c FROM tdx_imports WHERE add_date=?",
+                (day,)).fetchone()["c"]
+        return {"scan_history": n_scan, "watch_pool": n_watch, "tdx_imports": n_tdx}
+
+    def clear_calendar_day(self, day):
+        """一键清空某日期的全部数据（v0.8.14：行情日历 → 当日清单 → 🗑️ 清空当日）.
+
+        清空:
+          - scan_history: 该日所有命中（layer=1 一层粗筛 + layer=2 二层精筛），
+            匹配条件为 date(scan_time)=day OR trade_date=day（兼容历史日期对照扫描
+            的 trade_date 字段）
+          - watch_pool: 该日 add_date 的入池记录 + 关联的 trade_log
+          - tdx_imports: 该日 add_date 的日历二级观察池条目
+
+        返回 dict {scan_history, watch_pool, tdx_imports: int} 各表删除行数.
+        """
+        import datetime as _dt
+        # 先取出该日的 watch_pool id 列表（用于级联清理 trade_log）
+        with self._cursor() as cur:
+            watch_ids = [r["id"] for r in cur.execute(
+                "SELECT id FROM watch_pool WHERE add_date=?", (day,)).fetchall()]
+            # 1) 清 scan_history（一层 + 二层全部）
+            cur.execute(
+                "DELETE FROM scan_history "
+                "WHERE date(scan_time)=? OR trade_date=?",
+                (day, day))
+            n_scan = cur.rowcount
+            # 2) 清 tdx_imports（先于 watch_pool 互不影响，但顺序无所谓）
+            cur.execute("DELETE FROM tdx_imports WHERE add_date=?", (day,))
+            n_tdx = cur.rowcount
+            # 3) 清 trade_log（按 watch_id 列表）
+            if watch_ids:
+                placeholders = ",".join("?" * len(watch_ids))
+                cur.execute(f"DELETE FROM trade_log WHERE watch_id IN ({placeholders})",
+                            watch_ids)
+            # 4) 清 watch_pool
+            cur.execute("DELETE FROM watch_pool WHERE add_date=?", (day,))
+            n_watch = cur.rowcount
+        return {"scan_history": n_scan, "watch_pool": n_watch, "tdx_imports": n_tdx}
+
     # ---------------------------------------------------------------- 交易日志
     def add_trade(self, watch_id, code, name, trade_type, trigger_condition="",
                   trade_price=None, trade_volume=None, notes="", trade_time=None):

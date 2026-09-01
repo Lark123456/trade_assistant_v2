@@ -827,6 +827,15 @@ class CalendarTab(QWidget):
         self.date_label = QLabel("")
         self.date_label.setStyleSheet("font-weight:bold;")
         lbar.addWidget(self.date_label)
+        # v0.8.14：一键清空当日（一层粗筛 + 二层精筛 + 观察池 + 通达信日历导入全部清空）
+        self.clear_day_btn = QPushButton("🗑️ 一键清空当日")
+        self.clear_day_btn.setToolTip(
+            "删除当前日期下的所有数据：\n"
+            "• 一层粗筛命中\n• 二层精筛命中\n• 观察池入池记录\n• 通达信日历导入\n\n"
+            "操作前会弹出确认框并显示各表待删除条数。\n"
+            "不可恢复，请谨慎！")
+        self.clear_day_btn.clicked.connect(self._on_clear_day)
+        lbar.addWidget(self.clear_day_btn)
         # v0.8.1：移除顶部"方向筛选"下拉框——已被表头筛选菜单取代
         # （点击"策略"列表头任意位置弹菜单多选策略）
         lbar.addStretch(1)
@@ -881,6 +890,60 @@ class CalendarTab(QWidget):
             self.on_watch_added()
         if self._current_qdate is not None:
             self._open_date(self._current_qdate)
+
+    def _on_clear_day(self):
+        """v0.8.14：一键清空当前日期下的全部数据（一层粗筛/二层精筛/观察池/通达信导入）。
+
+        安全设计：
+        1. 先调 db.count_calendar_day(day) 预统计各表条数
+        2. 弹出确认对话框，列出待删除的精确数量
+        3. 用户必须点"确认清空"才执行
+        4. 操作完成后重新加载当日清单（会变空）+ 顶部月份统计 + 月历高亮
+        """
+        if not self._current_qdate:
+            return
+        day = self._current_qdate.toString("yyyy-MM-dd")
+        # 1) 预统计
+        try:
+            counts = self.db.count_calendar_day(day)
+        except Exception as e:
+            QMessageBox.critical(self, "清空失败", f"统计日期 {day} 数据失败：{e}")
+            return
+        total = counts["scan_history"] + counts["watch_pool"] + counts["tdx_imports"]
+        if total == 0:
+            QMessageBox.information(
+                self, "无需清空",
+                f"{day} 当日没有选股/入池/通达信导入数据。")
+            return
+        # 2) 确认对话框
+        msg = (f"即将删除 {day} 的全部数据（不可恢复）：\n\n"
+               f"  • 一层粗筛命中记录：{counts['scan_history']} 条\n"
+               f"  • 二层精筛命中记录：包含在上述扫描命中中\n"
+               f"  • 观察池入池记录：{counts['watch_pool']} 条\n"
+               f"  • 通达信日历导入记录：{counts['tdx_imports']} 条\n\n"
+               f"合计 {total} 条。继续？")
+        ret = QMessageBox.warning(
+            self, "⚠️ 确认清空当日数据",
+            msg,
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No)
+        if ret != QMessageBox.Yes:
+            return
+        # 3) 执行清空
+        try:
+            result = self.db.clear_calendar_day(day)
+        except Exception as e:
+            QMessageBox.critical(self, "清空失败", f"清空过程中出错：{e}")
+            return
+        # 4) 刷新：重载当日清单（会空）+ 月历高亮 + 顶部统计
+        self._open_date(self._current_qdate)
+        self._reload_month()
+        QMessageBox.information(
+            self, "✅ 已清空",
+            f"{day} 已清空：\n"
+            f"  • 扫描命中删除 {result['scan_history']} 条\n"
+            f"  • 观察池删除 {result['watch_pool']} 条\n"
+            f"  • 通达信导入删除 {result['tdx_imports']} 条")
 
     # ------------------------------------------------------------ 数据
     def _reload_month(self):
