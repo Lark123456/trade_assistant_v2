@@ -48,7 +48,8 @@ def make_block_name(strategy_name: str, date: Optional[datetime.date] = None,
     - .blk 文件名 和 cfg filename 字段（70字节）用更完整格式 make_block_filename()。
 
     v0.8.15: 支持 alias 参数 — 若传 alias (用户为 TDX 自定义的短名, ≤8字节),
-    直接用它做 cfg name 字段, 不再截断 strategy_name. 这样长策略名也能完整显示.
+    自动加 mmdd(date) 前缀组成完整 cfg name. 例如填 "海选" + 9月1号 -> "91海选".
+    不传 alias 则 fallback 用 strategy_name 截断(8字节 GBK 可能丢字).
 
     date 接受 datetime.date 对象 或 "YYYY-MM-DD" 字符串；传 None 或无效值时用今天。
     """
@@ -60,17 +61,19 @@ def make_block_name(strategy_name: str, date: Optional[datetime.date] = None,
             date = datetime.date.fromisoformat(date)
         except ValueError:
             date = datetime.date.today()
-    # v0.8.15: 优先用 alias (用户自定义短名). 仅 GBK 安全截断到 8 字节.
+    prefix = mmdd(date)  # 3 字节 ASCII, 自动按日期分桶
+    # v0.8.15: 优先用 alias (用户自定义短名). mmdd + alias 截断到 8 字节.
     if alias:
         alias = "".join(c for c in alias.strip()
                         if c not in '\\/:*?"<>|').strip()
         if alias:
-            return _gbk_truncate_to_bytes(alias, NAME_FIELD_LIMIT)
+            # 5 字节留给 alias (GBK 安全截断, 汉字防半字截断)
+            return prefix + _gbk_truncate_to_bytes(alias, NAME_FIELD_LIMIT - len(prefix))
     name = "".join(c for c in (strategy_name or "").strip()
                     if c not in '\\/:*?"<>|').strip()
     if not name:
         name = "未命名"
-    return mmdd(date) + _gbk_truncate_to_bytes(name, 8 - 3)
+    return prefix + _gbk_truncate_to_bytes(name, NAME_FIELD_LIMIT - len(prefix))
 
 
 def make_block_filename(strategy_name: str, date: Optional[datetime.date] = None) -> str:

@@ -17,7 +17,7 @@ from ui.models import PandasModel
 MODE_LABELS = {"intraday": "盘中重点", "batch": "盘前盘后全市场", "manual": "仅手动"}
 KIND_LABELS = {"formula": "通达信公式", "indicator": "指标存档", "dna": "DNA精筛"}
 
-STRATEGY_COLUMNS = ["id", "编号", "name", "类型", "描述", "节奏", "状态", "updated_at"]
+STRATEGY_COLUMNS = ["id", "编号", "name", "TDX简称", "类型", "描述", "节奏", "状态", "updated_at"]
 INDICATOR_COLUMNS = ["id", "编号", "name", "分类", "描述", "updated_at"]
 
 
@@ -37,6 +37,21 @@ class StrategyDialog(QDialog):
 
         self.name_edit = QLineEdit()
         form.addRow("策略名称", self.name_edit)
+
+        # v0.8.15：TDX cfg name 字段别名（≤8 字节 GBK，通达信板块管理显示）。
+        # 自动加 MMDD 日期前缀，您只需填"策略简称"部分（如"海选"/"B1HX"/"B1海"）。
+        self.tdx_alias_edit = QLineEdit()
+        self.tdx_alias_edit.setMaxLength(16)  # 最多 16 个 ASCII 或 8 个汉字
+        self.tdx_alias_edit.setPlaceholderText(
+            "TDX 板块管理显示的简称（≤8字节 GBK，自动加日期前缀）\n"
+            "例：填『海选』 → 9月1号 cfg name = 『91海选』\n"
+            "    填『B1HX』 → 9月1号 cfg name = 『91B1HX』\n"
+            "留空 → 用策略名截断（可能丢字）")
+        self.tdx_alias_edit.setToolTip(
+            "TDX cfg name 字段是 8 字节 GBK 硬限制，无法装完整长策略名。\n"
+            "这里填简称，代码会自动加日期前缀（MMDD，3字节）组装成完整 cfg name。\n"
+            "例：填『海选』+ 9月1号 → 『91海选』（5字节，TDX 完整显示）")
+        form.addRow("TDX 简称", self.tdx_alias_edit)
 
         self.kind_combo = QComboBox()
         self.kind_combo.addItem("通达信公式", "formula")
@@ -210,6 +225,8 @@ class StrategyDialog(QDialog):
                 max(0, self.mode_combo.findData(strategy.get("scan_mode", "batch"))))
             self.enabled_check.setChecked(bool(strategy.get("enabled", 1)))
             self.desc_edit.setPlainText(strategy.get("description") or "")
+            # v0.8.15：TDX 简称回填
+            self.tdx_alias_edit.setText(strategy.get("tdx_alias") or "")
             if strategy.get("kind") == "dna":
                 self._load_dna_config(strategy.get("formula") or "")
             else:
@@ -358,6 +375,7 @@ class StrategyDialog(QDialog):
             "parent_strategy_id": legacy_parent_id,  # 兼容
             "level": level, "tags": tags,
             "parent_strategy_ids": parent_strategy_ids,
+            "tdx_alias": self.tdx_alias_edit.text().strip(),
         }
         self.accept()
 
@@ -708,6 +726,7 @@ class StrategyTab(QWidget):
             else:
                 strats.append({
                     "id": r["id"], "编号": r.get("code", ""), "name": r["name"],
+                    "TDX简称": r.get("tdx_alias") or "",
                     "类型": KIND_LABELS.get(r.get("kind"), r.get("kind")),
                     "描述": desc,
                     "节奏": MODE_LABELS.get(r.get("scan_mode"), r.get("scan_mode")),
@@ -751,7 +770,8 @@ class StrategyTab(QWidget):
                                      parent_strategy_id=info.get("parent_strategy_id"),
                                      level=info.get("level", 1),
                                      tags=info.get("tags", ""),
-                                     parent_strategy_ids=info.get("parent_strategy_ids"))
+                                     parent_strategy_ids=info.get("parent_strategy_ids"),
+                                     tdx_alias=info.get("tdx_alias", ""))
                 self._refresh_all()
 
     def _edit(self):

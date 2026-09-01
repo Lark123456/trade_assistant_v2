@@ -621,7 +621,7 @@ class Database:
     def add_strategy(self, name, kind="formula", formula="", conditions=None,
                      scan_mode="batch", enabled=1, description="",
                      parent_strategy_id=None, level=1, tags="",
-                     parent_strategy_ids=None):
+                     parent_strategy_ids=None, tdx_alias=""):
         """新增策略：自动分配编号（S0001...，删除不回收），并写入 v1 版本 + 归档文件。
         v0.8.1 重构：
         - level=业务层级（1=方向/2=精细/3+=预留）
@@ -629,6 +629,7 @@ class Database:
         - parent_strategy_ids=多选父策略（level≥2 时使用，JSON 数组）
         - parent_strategy_id=单选父策略（兼容旧策略，新策略不用）
         - direction 字段已废弃（保留列不再写入）
+        v0.8.15：tdx_alias=TOML 通达信 cfg name 字段别名（≤8字节 GBK，留空则 fallback 用 name 截断）
         """
         if parent_strategy_ids is None:
             parent_strategy_ids = []
@@ -648,11 +649,13 @@ class Database:
             cur.execute(
                 "INSERT INTO strategies(code,name,kind,formula,conditions,description,"
                 "enabled,scan_mode,created_at,updated_at,parent_strategy_id,"
-                "level,tags,parent_strategy_ids) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "level,tags,parent_strategy_ids,tdx_alias) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (code, name, kind, formula,
                  json.dumps(conditions or {}, ensure_ascii=False), description or "",
                  enabled, scan_mode, now, now, parent_strategy_id,
-                 int(level), tags or "", parent_strategy_ids_json))
+                 int(level), tags or "", parent_strategy_ids_json,
+                 tdx_alias or ""))
             sid = cur.lastrowid
             cur.execute(
                 "INSERT INTO strategy_versions(strategy_id,code,version,name,kind,"
@@ -696,7 +699,7 @@ class Database:
         + parent_strategy_ids（level≥2 多选父策略 JSON）。"""
         allowed = {"name", "kind", "formula", "conditions", "description",
                    "enabled", "scan_mode", "parent_strategy_id",
-                   "level", "tags", "parent_strategy_ids"}
+                   "level", "tags", "parent_strategy_ids", "tdx_alias"}
         import datetime
         now = datetime.datetime.now().isoformat(timespec="seconds")
         archived = None
