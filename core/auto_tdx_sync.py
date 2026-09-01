@@ -1,15 +1,17 @@
 # -*- coding: utf-8 -*-
-"""选股 → 通达信自动同步（v0.8.10）。
+"""选股 → 通达信自动同步（v0.8.10 / v0.8.13）。
 
 盘前/盘后全市场扫描（mode="batch"）每次扫完一个策略后，自动把命中代码同步到通达信
-自定义板块，板块名 = `YYMMDD·<策略名>`（例 `260831·B1十张图`）。
+自定义板块，板块名 = `MMDD<策略名截断>`（例 `91B1海`，TDX cfg 8字节 GBK 硬限制）。
 - TDX 路径自动检测（Windows 常见如 E:\\TDX、C:\\new_tdx 等），可通过 settings `tdx.path` 覆盖
 - 设置 `tdx.auto_sync` = "0" 可关闭
 - TDX 不存在或路径无效时静默失败（仅返回 ok=False，不抛异常）
 
-注意：TDX `.cfg` 记录里"板块名"字段只有 8 字节 GBK 硬限制（v0.8.2 实测确认），所以
-TDX 里**显示**的板块名会被截到 8 字节——但 `.blk` 文件名和 `.cfg` 里 70 字节的 filename
-字段都会存完整名，用户按"开头形似自动归为子板块"的逻辑仍能工作（共享 `YYMMDD·` 前缀）。
+v0.8.13：.blk 文件名采用完整日期格式（`2026-9-1·B1海选.blk`，70 字节 cfg filename 字段同样存完整名），
+TDX 板块管理里看到的板块名依然是8字节短名（cfg name 字段硬限制），但打开 T0002\blocknew 文件夹
+按文件名字母序排列时，同一天扫描的板块会自然聚到一起（共享 `YYYY-M-D·` 前缀）。
+- TDX 自定义板块是平铺结构，没有"按前缀自动归集到子菜单"的官方机制，文件名前缀排序是
+  唯一能让用户感知到日期归类的折中方案。
 """
 from __future__ import annotations
 
@@ -36,12 +38,12 @@ def _gbk_truncate_to_bytes(s: str, max_bytes: int) -> str:
 
 
 def make_block_name(strategy_name: str, date: Optional[datetime.date] = None) -> str:
-    """组装板块名: MMDD + 策略名(总 GBK 字节 ≤ 8, 去掉分隔符省空间).
+    """组装**显示在 TDX 板块管理里的板块名**（cfg name 字段 8 字节 GBK 硬限制）。
 
     v0.8.12: 由之前的 `YYMMDD·策略名` 改为 `MMDD+策略名`。
     - MMDD 占 3 字节 ASCII, 留 5 字节 GBK 给策略名 (汉字策略名约 2 个汉字 + 字母前缀)。
     - 总 8 字节 GBK (TDX cfg name 字段硬限制)。
-    - 完整名仍写入 .blk 文件名 + cfg 的 70 字节 filename 字段 (用户按前缀分组仍能识别)。
+    - .blk 文件名 和 cfg filename 字段（70字节）用更完整格式 make_block_filename()。
 
     date 接受 datetime.date 对象 或 "YYYY-MM-DD" 字符串；传 None 或无效值时用今天。
     """
@@ -58,6 +60,31 @@ def make_block_name(strategy_name: str, date: Optional[datetime.date] = None) ->
     if not name:
         name = "未命名"
     return mmdd(date) + _gbk_truncate_to_bytes(name, 8 - 3)
+
+
+def make_block_filename(strategy_name: str, date: Optional[datetime.date] = None) -> str:
+    """组装**.blk 文件名 / cfg filename 字段**：完整日期 + 中点 + 策略名(70 字节内)。
+
+    例: 2026-9-1·B1海选
+    - YYYY-M-D 前缀(无前导零)便于文件名字母序排列时同日期自然聚合
+    - · 分隔符(v0.8.13 引入, 比纯 MMDD 短前缀辨识度高)
+    - 总长受 cfg filename 70 字节 GBK 限制, 长策略名会被 GBK 安全截断
+    """
+    if date is None:
+        date = datetime.date.today()
+    elif isinstance(date, str):
+        try:
+            date = datetime.date.fromisoformat(date)
+        except ValueError:
+            date = datetime.date.today()
+    name = "".join(c for c in (strategy_name or "").strip()
+                    if c not in '\\/:*?"<>|').strip()
+    if not name:
+        name = "未命名"
+    date_prefix = f"{date.year}-{date.month}-{date.day}"
+    # 70 字节预算: 日期前缀 + · + 策略名
+    raw = date_prefix + "·" + name
+    return _gbk_truncate_to_bytes(raw, 70)
 
 
 def _resolve_tdx_root(db, fallback: Optional[str] = None) -> Optional[str]:
@@ -116,16 +143,19 @@ def auto_sync_codes_to_tdx(db, strategy_name: str, codes: List[str],
     # 5. 导出
     try:
         # date 可能是 "YYYY-MM-DD" 字符串(扫描链路传入) 或 datetime.date 对象,
-        # make_block_name 需要 .month/.day 属性. 解析失败时退回今天.
+        # make_block_name/make_block_filename 需要 .month/.day 属性. 解析失败时退回今天.
         if isinstance(date, str):
             try:
                 date = datetime.date.fromisoformat(date)
             except ValueError:
                 date = datetime.date.today()
-        block_name = make_block_name(strategy_name, date)
+        # v0.8.13: TDX cfg name 字段(8 字节 GBK 硬限制)用短名, .blk 文件名/cfg filename(70 字节)
+        # 用完整日期格式, 便于文件夹按字母序排列时同日期板块自然聚合
+        short_name = make_block_name(strategy_name, date)  # TDX 板块管理里显示
+        filename = make_block_filename(strategy_name, date)  # .blk 文件名 + cfg filename
         sync = TdxBlockSync(tdx_root)
-        n, path = sync.export_block(clean_codes, block_name, overwrite=True)
-        msg = (f"✅ 同步 {n} 只到通达信板块「{block_name}」\n"
+        n, path = sync.export_block(clean_codes, filename, overwrite=True)
+        msg = (f"✅ 同步 {n} 只到通达信板块「{short_name}」\n"
                f"   路径: {path}\n   TDX 根目录: {tdx_root}")
         return True, msg
     except Exception as e:  # noqa: BLE001
