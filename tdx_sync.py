@@ -77,7 +77,11 @@ def read_blk(path: str) -> List[TdxStock]:
 
 
 def write_blk(path: str, stocks: Iterable[TdxStock]) -> int:
-    """写 .blk 文件（覆盖）。返回写入条数。"""
+    """写 .blk 文件（覆盖）。返回写入条数。
+
+    v0.8.15：写完自动加只读保护（Windows: attrib +R / Linux: chmod 444），
+    防止 TDX 启动时"清理孤儿 .blk"时把我们的同步结果删掉。
+    """
     lines, seen = [], set()
     for st in stocks:
         if st.code in seen:
@@ -85,9 +89,41 @@ def write_blk(path: str, stocks: Iterable[TdxStock]) -> int:
         seen.add(st.code)
         lines.append(st.line)
     os.makedirs(os.path.dirname(path), exist_ok=True)
+    # 写入前先放开只读（防止 overwrite 时被拒）
+    _unset_readonly(path)
     with open(path, "w", encoding="ascii", newline="") as f:
         f.write("\r\n".join(lines) + ("\r\n" if lines else ""))
+    # 写完再加只读
+    _set_readonly(path)
     return len(lines)
+
+
+def _set_readonly(path: str):
+    """给 .blk 文件加只读属性。Windows 用 attrib, Linux 用 chmod 444。"""
+    try:
+        if os.name == 'nt':
+            import subprocess
+            subprocess.run(['attrib', '+R', path], check=False,
+                           creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+        else:
+            import stat
+            os.chmod(path, stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH)
+    except Exception as e:  # noqa: BLE001
+        log.debug("设置只读失败 %s: %s", path, e)
+
+
+def _unset_readonly(path: str):
+    """移除只读属性。Windows 用 attrib -R, Linux 用 chmod 644。"""
+    try:
+        if os.name == 'nt':
+            import subprocess
+            subprocess.run(['attrib', '-R', path], check=False,
+                           creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+        else:
+            import stat
+            os.chmod(path, stat.S_IRUSR | stat.S_IWUSR | stat.S_IRGRP | stat.S_IROTH)
+    except Exception as e:  # noqa: BLE001
+        log.debug("移除只读失败 %s: %s", path, e)
 
 
 class TdxBlockSync:
