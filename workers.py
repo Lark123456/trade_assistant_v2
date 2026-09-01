@@ -325,6 +325,47 @@ class Worker(QThread):
             + ("（历史日期对照，未自动进池）" if is_hist else ""))
         return results
 
+    def _finalize_strategy_hits(self, strategy, results, session_id, mode, payload):
+        """v0.8.11：auto_scan 多策略合并扫描后，对单个策略的结果做收尾处理
+        （复用单策略扫描的收尾逻辑）：
+
+        1. 命中入库 add_scan_hits（带 layer 与 parent_strategy_ids）；
+        2. 计算新命中（当日该策略此前未命中的股票）；
+        3. 非历史日期对照时自动进观察池；
+        4. 发 scan_done / status 信号。
+
+        返回 hits（即传入的 results）。
+        """
+        level = int(strategy.get("level", 1) or 1)
+        psids = self._parse_parent_strategy_ids(strategy)
+        if results:
+            self.db.add_scan_hits(session_id, strategy.get("id"),
+                                  strategy.get("name"), results,
+                                  layer=level, parent_strategy_ids=psids)
+        # 新命中 = 本次结果中，当日该策略此前未命中过的股票
+        prev = {x["code"] for x in self.db.hits_today(session_exclude=session_id)
+                if x.get("strategy_id") == strategy.get("id")}
+        new_hits = [h for h in results if h.code not in prev]
+        # v0.7.3：历史日期对照扫描不自动进池（信号已错过，进池无意义）
+        is_hist = self._is_historical_scan(payload.get("end_date"))
+        if not is_hist:
+            # v0.8.12：add_date = 用户选的 end_date (缺省今天) -> 全部日期对齐
+            import datetime as _dt
+            _signal_date = payload.get("end_date") or _dt.date.today().isoformat()
+            self._auto_add_to_watch(new_hits, strategy, level=level,
+                                    add_date=_signal_date)
+        self.scan_done.emit({
+            "results": results, "new_hits": new_hits, "session_id": session_id,
+            "strategy_name": strategy.get("name"), "mode": mode,
+            "historical": is_hist, "level": level,
+            "parent_strategy_ids": psids,
+        })
+        self.status.emit(
+            f"策略「{strategy.get('name')}」扫描完成：命中 {len(results)} 只，"
+            f"其中新信号 {len(new_hits)} 只"
+            + ("（历史日期对照，未自动进池）" if is_hist else ""))
+        return results
+
     def _parse_parent_strategy_ids(self, strategy):
         """从 strategy 字典提取 parent_strategy_ids（兼容 JSON 字符串 + parent_strategy_id 单值）。
         返回 int 列表。
