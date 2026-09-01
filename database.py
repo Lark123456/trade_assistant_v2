@@ -107,8 +107,12 @@ CREATE TABLE IF NOT EXISTS strategies (
     enabled INTEGER DEFAULT 1,
     scan_mode TEXT DEFAULT 'batch',   -- intraday 盘中重点 / batch 盘前盘后全市场 / manual 手动
     created_at TEXT,
-    updated_at TEXT
+    updated_at TEXT,
+    tdx_alias TEXT                    -- v0.8.15: TDX cfg name 字段别名(≤8字节 GBK),
+                                       -- 用于通达信板块管理的"目录名/分组名"; 不填 fallback 到 name 截断
 );
+-- v0.8.15: 已有 db 升级: ALTER TABLE 加 tdx_alias 列(若不存在)
+-- SQLite 不支持 IF NOT EXISTS for ADD COLUMN, 用 try/except 包裹
 CREATE TABLE IF NOT EXISTS strategy_versions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     strategy_id INTEGER,
@@ -188,6 +192,10 @@ class Database:
         now = datetime.datetime.now().isoformat(timespec="seconds")
         cur = self._conn.cursor()
         cols = {r[1] for r in cur.execute("PRAGMA table_info(strategies)").fetchall()}
+        # v0.8.15：TDX cfg name 别名(≤8字节 GBK, 用户可手动填)
+        if "tdx_alias" not in cols:
+            cur.execute("ALTER TABLE strategies ADD COLUMN tdx_alias TEXT")
+            log.info("数据库升级：strategies 表新增 tdx_alias 列")
         if "description" not in cols:
             cur.execute("ALTER TABLE strategies ADD COLUMN description TEXT")
             log.info("数据库升级：strategies 表新增 description 列")

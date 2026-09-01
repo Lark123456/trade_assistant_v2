@@ -23,6 +23,7 @@ log = logging.getLogger("auto_tdx_sync")
 
 SETTING_AUTO = "tdx.auto_sync"   # "1" / "0"
 SETTING_PATH = "tdx.path"          # 自定义 TDX 安装根目录
+NAME_FIELD_LIMIT = 8              # cfg name 字段最大 GBK 字节数 (TDX 硬限制)
 
 
 def mmdd(date: Optional[datetime.date] = None) -> str:
@@ -37,13 +38,17 @@ def _gbk_truncate_to_bytes(s: str, max_bytes: int) -> str:
     return raw.decode("gbk", errors="ignore")
 
 
-def make_block_name(strategy_name: str, date: Optional[datetime.date] = None) -> str:
+def make_block_name(strategy_name: str, date: Optional[datetime.date] = None,
+                   alias: Optional[str] = None) -> str:
     """组装**显示在 TDX 板块管理里的板块名**（cfg name 字段 8 字节 GBK 硬限制）。
 
     v0.8.12: 由之前的 `YYMMDD·策略名` 改为 `MMDD+策略名`。
     - MMDD 占 3 字节 ASCII, 留 5 字节 GBK 给策略名 (汉字策略名约 2 个汉字 + 字母前缀)。
     - 总 8 字节 GBK (TDX cfg name 字段硬限制)。
     - .blk 文件名 和 cfg filename 字段（70字节）用更完整格式 make_block_filename()。
+
+    v0.8.15: 支持 alias 参数 — 若传 alias (用户为 TDX 自定义的短名, ≤8字节),
+    直接用它做 cfg name 字段, 不再截断 strategy_name. 这样长策略名也能完整显示.
 
     date 接受 datetime.date 对象 或 "YYYY-MM-DD" 字符串；传 None 或无效值时用今天。
     """
@@ -55,6 +60,12 @@ def make_block_name(strategy_name: str, date: Optional[datetime.date] = None) ->
             date = datetime.date.fromisoformat(date)
         except ValueError:
             date = datetime.date.today()
+    # v0.8.15: 优先用 alias (用户自定义短名). 仅 GBK 安全截断到 8 字节.
+    if alias:
+        alias = "".join(c for c in alias.strip()
+                        if c not in '\\/:*?"<>|').strip()
+        if alias:
+            return _gbk_truncate_to_bytes(alias, NAME_FIELD_LIMIT)
     name = "".join(c for c in (strategy_name or "").strip()
                     if c not in '\\/:*?"<>|').strip()
     if not name:
@@ -106,9 +117,14 @@ def _resolve_tdx_root(db, fallback: Optional[str] = None) -> Optional[str]:
 
 
 def auto_sync_codes_to_tdx(db, strategy_name: str, codes: List[str],
-                             date: Optional[datetime.date] = None
+                             date: Optional[datetime.date] = None,
+                             tdx_alias: Optional[str] = None
                              ) -> Tuple[bool, str]:
-    """把一组股票代码同步到通达信板块（板块名 = YYMMDD·<策略名>）。
+    """把一组股票代码同步到通达信板块.
+
+    - cfg name 字段(8字节 GBK)用 tdx_alias(优先) 或 strategy_name(被截断)
+    - cfg filename + .blk 文件名 用完整日期·策略名(70字节内)
+    - tdx_alias: db.strategies.tdx_alias 字段(用户自定义短名). 不传则自动查 db
 
     返回 (ok, message)。失败不抛异常。
     """
@@ -149,9 +165,19 @@ def auto_sync_codes_to_tdx(db, strategy_name: str, codes: List[str],
                 date = datetime.date.fromisoformat(date)
             except ValueError:
                 date = datetime.date.today()
+        # v0.8.15: 优先用 tdx_alias (用户为 TDX 板块管理自定义的短名) 做 cfg name;
+        # 自动从 db 查 (按 strategy_name 匹配 name 列).
+        if tdx_alias is None:
+            try:
+                row = db._conn.execute(
+                    "SELECT tdx_alias FROM strategies WHERE name=? LIMIT 1",
+                    (strategy_name,)).fetchone()
+                tdx_alias = (row["tdx_alias"] if row and row["tdx_alias"] else None)
+            except Exception:
+                tdx_alias = None
         # v0.8.13: TDX cfg name 字段(8 字节 GBK 硬限制)用短名, .blk 文件名/cfg filename(70 字节)
         # 用完整日期格式, 便于文件夹按字母序排列时同日期板块自然聚合
-        short_name = make_block_name(strategy_name, date)  # TDX 板块管理里显示
+        short_name = make_block_name(strategy_name, date, alias=tdx_alias)  # TDX 板块管理里显示
         filename = make_block_filename(strategy_name, date)  # .blk 文件名 + cfg filename
         sync = TdxBlockSync(tdx_root)
         n, path = sync.export_block(clean_codes, filename, overwrite=True)
