@@ -149,9 +149,11 @@ def scan_formula(feed, stock_df: pd.DataFrame, formula: str, max_stocks=100,
                         results.append(_make_scan_result(row, df_t, labels, d,
                                                          direction, strategy_id))
             else:
+                # v0.8.13：非历史日期扫描时 signal_date 用最后一根K线日期(同 multi_scan_formula)
+                _last_date = str(df["date"].iloc[-1]) if not df.empty else None
                 hit, labels = formula_signal(df, formula)
                 if hit:
-                    results.append(_make_scan_result(row, df, labels, None,
+                    results.append(_make_scan_result(row, df, labels, _last_date,
                                                      direction, strategy_id))
         except Exception as e:  # noqa: BLE001
             log.debug("扫描 %s 失败: %s", row.code, e)
@@ -378,6 +380,10 @@ def multi_scan_formula(feed, stock_df, formulas,
                             buckets[sid].append(_make_scan_result(
                                 row, df_t, labels, d, "", sid))
             else:
+                # v0.8.13：非历史日期扫描时，signal_date 用最后一根K线日期
+                # (原传 None → 转 ""，导致下游 TDX 板块名 fallback 到 scan_end 控件,
+                # 与实际信号日可能不一致). 取 df.iloc[-1].date 字符串.
+                _last_date = str(df["date"].iloc[-1]) if not df.empty else None
                 for sid, name, formula in valid:
                     try:
                         hit, labels = formula_signal(df, formula)
@@ -385,7 +391,7 @@ def multi_scan_formula(feed, stock_df, formulas,
                         continue
                     if hit:
                         buckets[sid].append(_make_scan_result(
-                            row, df, labels, None, "", sid))
+                            row, df, labels, _last_date, "", sid))
         except Exception as e:  # noqa: BLE001
             log.debug("多策略扫描 %s 失败: %s", row.code, e)
     log.info("多策略扫描完成：%d 个策略，共 %d 只命中，耗时 %.1fs",
