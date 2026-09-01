@@ -42,7 +42,17 @@ def make_block_name(strategy_name: str, date: Optional[datetime.date] = None) ->
     - MMDD 占 3 字节 ASCII, 留 5 字节 GBK 给策略名 (汉字策略名约 2 个汉字 + 字母前缀)。
     - 总 8 字节 GBK (TDX cfg name 字段硬限制)。
     - 完整名仍写入 .blk 文件名 + cfg 的 70 字节 filename 字段 (用户按前缀分组仍能识别)。
+
+    date 接受 datetime.date 对象 或 "YYYY-MM-DD" 字符串；传 None 或无效值时用今天。
     """
+    # 防御性归一化: 字符串/None → datetime.date
+    if date is None:
+        date = datetime.date.today()
+    elif isinstance(date, str):
+        try:
+            date = datetime.date.fromisoformat(date)
+        except ValueError:
+            date = datetime.date.today()
     name = "".join(c for c in (strategy_name or "").strip()
                     if c not in '\\/:*?"<>|').strip()
     if not name:
@@ -105,6 +115,13 @@ def auto_sync_codes_to_tdx(db, strategy_name: str, codes: List[str],
 
     # 5. 导出
     try:
+        # date 可能是 "YYYY-MM-DD" 字符串(扫描链路传入) 或 datetime.date 对象,
+        # make_block_name 需要 .month/.day 属性. 解析失败时退回今天.
+        if isinstance(date, str):
+            try:
+                date = datetime.date.fromisoformat(date)
+            except ValueError:
+                date = datetime.date.today()
         block_name = make_block_name(strategy_name, date)
         sync = TdxBlockSync(tdx_root)
         n, path = sync.export_block(clean_codes, block_name, overwrite=True)
