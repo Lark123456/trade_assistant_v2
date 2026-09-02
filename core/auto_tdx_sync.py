@@ -27,9 +27,13 @@ NAME_FIELD_LIMIT = 8              # cfg name 字段最大 GBK 字节数 (TDX 硬
 
 
 def mmdd(date: Optional[datetime.date] = None) -> str:
-    """月日 无前导零(例 2026-08-31 → '831'),省 GBK 字节给策略名."""
+    """月日 带前导零 4字节 (例 2026-08-31 → '0831', 2026-09-01 → '0901').
+
+    v0.8.17: 改用 4 字节 MMDD (带前导零), 配合 4 字节别名 = 8 字节 cfg name 完美利用.
+    避免 1月1号=11 跟 1月11号=111 混淆.
+    """
     d = date or datetime.date.today()
-    return f"{d.month}{d.day}"
+    return f"{d.month:02d}{d.day:02d}"
 
 
 def _gbk_truncate_to_bytes(s: str, max_bytes: int) -> str:
@@ -43,12 +47,15 @@ def make_block_name(strategy_name: str, date: Optional[datetime.date] = None,
     """组装**显示在 TDX 板块管理里的板块名**（cfg name 字段 8 字节 GBK 硬限制）。
 
     v0.8.12: 由之前的 `YYMMDD·策略名` 改为 `MMDD+策略名`。
-    - MMDD 占 3 字节 ASCII, 留 5 字节 GBK 给策略名 (汉字策略名约 2 个汉字 + 字母前缀)。
-    - 总 8 字节 GBK (TDX cfg name 字段硬限制)。
-    - .blk 文件名 和 cfg filename 字段（70字节）用更完整格式 make_block_filename()。
+    v0.8.17: 进一步改成 `MMDD(4字节带前导零) + alias(4字节)` = 完美 8 字节利用.
 
-    v0.8.15: 支持 alias 参数 — 若传 alias (用户为 TDX 自定义的短名, ≤8字节),
-    自动加 mmdd(date) 前缀组成完整 cfg name. 例如填 "海选" + 9月1号 -> "91海选".
+    设计:
+    - MMDD 占 4 字节 ASCII (例 9月1号 = "0901", 1月1号 = "0101", 避免 11 跟 111 混淆)
+    - alias 占 4 字节 GBK (汉字最多 2 个 或 4 个 ASCII 字母)
+    - 总 8 字节 GBK (TDX cfg name 字段硬限制)
+
+    v0.8.15: 支持 alias 参数 — 若传 alias (用户为 TDX 自定义的短名, ≤4字节),
+    自动加 mmdd(date) 前缀组成完整 cfg name. 例如填 "海选" + 9月1号 -> "0901海选".
     不传 alias 则 fallback 用 strategy_name 截断(8字节 GBK 可能丢字).
 
     date 接受 datetime.date 对象 或 "YYYY-MM-DD" 字符串；传 None 或无效值时用今天。
@@ -61,13 +68,13 @@ def make_block_name(strategy_name: str, date: Optional[datetime.date] = None,
             date = datetime.date.fromisoformat(date)
         except ValueError:
             date = datetime.date.today()
-    prefix = mmdd(date)  # 3 字节 ASCII, 自动按日期分桶
+    prefix = mmdd(date)  # 4 字节 ASCII (带前导零)
     # v0.8.15: 优先用 alias (用户自定义短名). mmdd + alias 截断到 8 字节.
     if alias:
         alias = "".join(c for c in alias.strip()
                         if c not in '\\/:*?"<>|').strip()
         if alias:
-            # 5 字节留给 alias (GBK 安全截断, 汉字防半字截断)
+            # 4 字节留给 alias (GBK 安全截断, 汉字防半字截断)
             return prefix + _gbk_truncate_to_bytes(alias, NAME_FIELD_LIMIT - len(prefix))
     name = "".join(c for c in (strategy_name or "").strip()
                     if c not in '\\/:*?"<>|').strip()
