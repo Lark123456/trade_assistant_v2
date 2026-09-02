@@ -46,41 +46,33 @@ def make_block_name(strategy_name: str, date: Optional[datetime.date] = None,
                    alias: Optional[str] = None) -> str:
     """组装**显示在 TDX 板块管理里的板块名**（cfg name 字段 8 字节 GBK 硬限制）。
 
-    v0.8.12: 由之前的 `YYMMDD·策略名` 改为 `MMDD+策略名`。
-    v0.8.17: 进一步改成 `MMDD(4字节带前导零) + alias(4字节)` = 完美 8 字节利用.
+    v0.8.18: 平铺方案 - cfg name 字段**直接是策略名(≤8字节 GBK)**, 不加日期前缀.
+    - 完全平铺, TDX 不会自动建目录(无日期前缀就无目录归类)
+    - 日期信息保留在 .blk 文件名 和 cfg filename 字段(70字节)
+    - 牺牲"按日期自动归类"换来"策略名完整可见" (用户优先级)
 
-    设计:
-    - MMDD 占 4 字节 ASCII (例 9月1号 = "0901", 1月1号 = "0101", 避免 11 跟 111 混淆)
-    - alias 占 4 字节 GBK (汉字最多 2 个 或 4 个 ASCII 字母)
-    - 总 8 字节 GBK (TDX cfg name 字段硬限制)
+    优先用 alias (用户填的简称), 没填 fallback 用 strategy_name 截断(可能丢字).
 
-    v0.8.15: 支持 alias 参数 — 若传 alias (用户为 TDX 自定义的短名, ≤4字节),
-    自动加 mmdd(date) 前缀组成完整 cfg name. 例如填 "海选" + 9月1号 -> "0901海选".
-    不传 alias 则 fallback 用 strategy_name 截断(8字节 GBK 可能丢字).
-
-    date 接受 datetime.date 对象 或 "YYYY-MM-DD" 字符串；传 None 或无效值时用今天。
+    date 参数保留接口兼容, 但不再用于 cfg name.
     """
-    # 防御性归一化: 字符串/None → datetime.date
+    # 防御性归一化: 字符串/None (保留兼容, 不再使用)
     if date is None:
-        date = datetime.date.today()
+        pass
     elif isinstance(date, str):
-        try:
-            date = datetime.date.fromisoformat(date)
-        except ValueError:
-            date = datetime.date.today()
-    prefix = mmdd(date)  # 4 字节 ASCII (带前导零)
-    # v0.8.15: 优先用 alias (用户自定义短名). mmdd + alias 截断到 8 字节.
+        pass
+
+    # v0.8.18: cfg name = alias (或截断的 strategy_name), 不加日期前缀
     if alias:
-        alias = "".join(c for c in alias.strip()
-                        if c not in '\\/:*?"<>|').strip()
-        if alias:
-            # 4 字节留给 alias (GBK 安全截断, 汉字防半字截断)
-            return prefix + _gbk_truncate_to_bytes(alias, NAME_FIELD_LIMIT - len(prefix))
+        name = "".join(c for c in alias.strip()
+                       if c not in '\\/:*?"<>|').strip()
+        if name:
+            return _gbk_truncate_to_bytes(name, NAME_FIELD_LIMIT)
+    # fallback: 用完整策略名截断
     name = "".join(c for c in (strategy_name or "").strip()
                     if c not in '\\/:*?"<>|').strip()
     if not name:
         name = "未命名"
-    return prefix + _gbk_truncate_to_bytes(name, NAME_FIELD_LIMIT - len(prefix))
+    return _gbk_truncate_to_bytes(name, NAME_FIELD_LIMIT)
 
 
 def make_block_filename(strategy_name: str, date: Optional[datetime.date] = None) -> str:
