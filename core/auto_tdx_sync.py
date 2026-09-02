@@ -46,33 +46,33 @@ def make_block_name(strategy_name: str, date: Optional[datetime.date] = None,
                    alias: Optional[str] = None) -> str:
     """组装**显示在 TDX 板块管理里的板块名**（cfg name 字段 8 字节 GBK 硬限制）。
 
-    v0.8.18: 平铺方案 - cfg name 字段**直接是策略名(≤8字节 GBK)**, 不加日期前缀.
-    - 完全平铺, TDX 不会自动建目录(无日期前缀就无目录归类)
-    - 日期信息保留在 .blk 文件名 和 cfg filename 字段(70字节)
-    - 牺牲"按日期自动归类"换来"策略名完整可见" (用户优先级)
+    v0.8.19: 加回日期前缀方案 - cfg name = MMDD(4字节) + alias(4字节) = 完美 8 字节.
+    - cfg name 字段显示日期+简称 (例 "0901海选")
+    - cfg filename 字段 + .blk 文件名 = 完整日期·策略名 (70字节内)
+    - TDX 自动按 cfg name 字段的前 4 字节建母目录 (例 "0901"), 后面 4 字节作子条目
 
-    优先用 alias (用户填的简称), 没填 fallback 用 strategy_name 截断(可能丢字).
-
-    date 参数保留接口兼容, 但不再用于 cfg name.
+    date 接受 datetime.date 对象 或 "YYYY-MM-DD" 字符串；传 None 或无效值时用今天。
     """
-    # 防御性归一化: 字符串/None (保留兼容, 不再使用)
+    # 防御性归一化: 字符串/None → datetime.date
     if date is None:
-        pass
+        date = datetime.date.today()
     elif isinstance(date, str):
-        pass
-
-    # v0.8.18: cfg name = alias (或截断的 strategy_name), 不加日期前缀
+        try:
+            date = datetime.date.fromisoformat(date)
+        except ValueError:
+            date = datetime.date.today()
+    prefix = mmdd(date)  # 4 字节 ASCII (带前导零, 9月1号=0901, 1月1号=0101)
+    # cfg name = mmdd + alias (或截断的 strategy_name fallback)
     if alias:
-        name = "".join(c for c in alias.strip()
-                       if c not in '\\/:*?"<>|').strip()
-        if name:
-            return _gbk_truncate_to_bytes(name, NAME_FIELD_LIMIT)
-    # fallback: 用完整策略名截断
+        alias = "".join(c for c in alias.strip()
+                        if c not in '\\/:*?"<>|').strip()
+        if alias:
+            return prefix + _gbk_truncate_to_bytes(alias, NAME_FIELD_LIMIT - len(prefix))
     name = "".join(c for c in (strategy_name or "").strip()
                     if c not in '\\/:*?"<>|').strip()
     if not name:
         name = "未命名"
-    return _gbk_truncate_to_bytes(name, NAME_FIELD_LIMIT)
+    return prefix + _gbk_truncate_to_bytes(name, NAME_FIELD_LIMIT - len(prefix))
 
 
 def make_block_filename(strategy_name: str, date: Optional[datetime.date] = None) -> str:
