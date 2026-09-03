@@ -114,16 +114,17 @@ class ScanCenter(QWidget):
         for e in (self.scan_start, self.scan_end):
             e.setCalendarPopup(True)
             e.setDisplayFormat("yyyy-MM-dd")
-            if dmin and dmax:
+            # v0.8.20: 日期控件 max 改用今天 (允许选还没缓存 K 线的日期)
+            #           min 用 db 缓存的最早日期 (避免选太早没数据)
+            if dmin:
                 e.setMinimumDate(QDate.fromString(dmin, "yyyy-MM-dd"))
-                e.setMaximumDate(QDate.fromString(dmax, "yyyy-MM-dd"))
-            else:
-                e.setMaximumDate(QDate.currentDate())
-        default = QDate.fromString(dmax, "yyyy-MM-dd") if dmax else QDate.currentDate()
-        self.scan_start.setDate(default)
-        self.scan_end.setDate(default)
-        self.scan_start.setToolTip("信号日期范围起点（默认=最新交易日；选历史日期可对照验证）")
-        self.scan_end.setToolTip("信号日期范围终点（默认=最新交易日；选历史日期可对照验证）")
+            e.setMaximumDate(QDate.currentDate().addDays(7))  # 允许选未来一周(预留)
+            e.setMinimumDate(QDate.currentDate().addYears(-5))  # 下限放宽到 5 年前
+        # 默认 end_date = 今天 (而不是缓存最大日期), 让用户跑今天的扫描
+        self.scan_start.setDate(QDate.currentDate().addMonths(-1))
+        self.scan_end.setDate(QDate.currentDate())
+        self.scan_start.setToolTip("信号日期范围起点（默认=一个月前；可手动调整）")
+        self.scan_end.setToolTip("信号日期范围终点（默认=今天；选历史日期可对照验证）")
         bar.addWidget(self.scan_start)
         bar.addWidget(QLabel("~"))
         bar.addWidget(self.scan_end)

@@ -594,14 +594,14 @@ class ScanDateDialog(QDialog):
         for e in (self.start_edit, self.end_edit):
             e.setCalendarPopup(True)
             e.setDisplayFormat("yyyy-MM-dd")
-            if dmin and dmax:
+            # v0.8.20: 日期控件 max 改用今天(允许选还没缓存 K 线的日期)
+            if dmin:
                 e.setMinimumDate(QDate.fromString(dmin, "yyyy-MM-dd"))
-                e.setMaximumDate(QDate.fromString(dmax, "yyyy-MM-dd"))
-            else:
-                e.setMaximumDate(QDate.currentDate())
-        default = QDate.fromString(dmax, "yyyy-MM-dd") if dmax else QDate.currentDate()
-        self.start_edit.setDate(default)
-        self.end_edit.setDate(default)
+            e.setMaximumDate(QDate.currentDate().addDays(7))   # 允许选未来一周
+            e.setMinimumDate(QDate.currentDate().addYears(-5))  # 下限放宽到 5 年前
+        # 默认 end_date = 今天 (而不是缓存最大日期)
+        self.start_edit.setDate(QDate.currentDate().addMonths(-1))
+        self.end_edit.setDate(QDate.currentDate())
         form.addRow("开始日期", self.start_edit)
         form.addRow("结束日期", self.end_edit)
         note = QLabel(

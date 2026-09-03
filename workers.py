@@ -510,11 +510,23 @@ class Worker(QThread):
 
     def _is_historical_scan(self, date_str):
         """判断 signal_date 是否指向历史日期（非最新交易日）。
-        历史日期对照扫描的结果不自动进观察池（v0.7.3）。"""
+        历史日期对照扫描的结果不自动进观察池（v0.7.3）。
+
+        v0.8.20: 用 db 缓存最大日期 + 1 天作为"最新"基准, 避免今天还没缓存 K 线时被误判为历史.
+        """
         if not date_str:
             return False
         _dmin, dmax = self.db.get_bars_date_range()
-        return bool(dmax) and date_str != dmax
+        if not dmax:
+            return False
+        # dmax 是 db 缓存的最新 K 线日期, 假设"最新交易日"就是 dmax 或 dmax+1(今天还没缓存)
+        from datetime import date as _date, timedelta as _td
+        try:
+            dmax_date = _date.fromisoformat(dmax)
+            latest = max(dmax_date, _date.today())
+            return date_str != latest.isoformat()
+        except ValueError:
+            return False
 
     def _auto_add_to_watch(self, hits, strategy, layer=1, level=None,
                             add_date=None):
