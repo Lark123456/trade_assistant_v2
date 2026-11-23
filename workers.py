@@ -29,6 +29,8 @@ class Worker(QThread):
     scan_progress = pyqtSignal(int, int, str)
     scan_done = pyqtSignal(object)                 # {"results","new_hits","session_id",...}
     scan_error = pyqtSignal(str)
+    # v0.10.0：整批自动扫描（auto_scan，含二层串联）全部结束——供「自动日报」收尾
+    auto_scan_done = pyqtSignal(object)            # {"mode","hits","start_date","end_date",...}
 
     def __init__(self, feed: DataFeed, db: Database, parent=None):
         super().__init__(parent)
@@ -197,9 +199,9 @@ class Worker(QThread):
             # 关键: 一次全市场遍历, 每只票只拉一次K线/算一次指标,
             # 对该票的指标数据逐公式求值, 返回 {strategy_id: [ScanResult]}
             self._set_scanning(True)
+            all_hits = []
+            mode = payload.get("mode")
             try:
-                all_hits = []
-                mode = payload["mode"]
                 formula_strategies = [s for s in payload["strategies"]
                                       if s.get("kind") != "dna"]
                 dna_strategies = [s for s in payload["strategies"]
@@ -260,9 +262,22 @@ class Worker(QThread):
                     }) or []
                     all_hits.extend(hits)
                 self._chain_layer2(all_hits, payload)
-                self.status.emit("自动扫描全部完成")
+                if all_hits:
+                    self.status.emit("自动扫描全部完成")
+                else:
+                    self.status.emit(
+                        "自动扫描完成但 0 命中：若行情服务器取数失败会回退到旧缓存，"
+                        "请查看 logs/app.log 中的『网络取数失败』并重跑 probe_tdx_servers.py")
             finally:
                 self._set_scanning(False)
+                # v0.10.0：整批扫描（含二层串联）收尾通知，供「自动日报」生成与推送
+                self.auto_scan_done.emit({
+                    "mode": mode,
+                    "hits": len(all_hits),
+                    "start_date": payload.get("start_date"),
+                    "end_date": payload.get("end_date"),
+                    "cancelled": self._scan_cancel.is_set(),
+                })
 
     # ------------------------------------------------------------ 策略扫描
     def _run_strategy_scan(self, p):
@@ -497,7 +512,11 @@ class Worker(QThread):
         # 历史日期对照不自动进池（信号已错过）
         is_hist = self._is_historical_scan(as_of_date)
         if not is_hist:
-            self._dna_add_to_watch(hits2, {"name": "自动二层精筛"})
+            # v0.9.0：add_date 与一层/扫描日期对齐
+            import datetime as _dt
+            _signal_date = as_of_date or _dt.date.today().isoformat()
+            self._dna_add_to_watch(hits2, {"name": "自动二层精筛"},
+                                   add_date=_signal_date)
             self.db.mark_session_in_watchlist(session_id)
         self.scan_done.emit({
             "results": hits2, "new_hits": hits2, "session_id": session_id,
@@ -684,7 +703,12 @@ class Worker(QThread):
         # v0.7.3：历史日期对照精筛不自动进池（信号已错过，进池无意义）
         is_hist = self._is_historical_scan(as_of_date)
         if not is_hist:
-            self._dna_add_to_watch(hits, strategy, level=level)
+            # v0.9.0：add_date = 用户选的 as_of_date/end_date（缺省今天），
+            # 保证与一层粗筛 / scan_history.trade_date 日期对齐
+            import datetime as _dt
+            _signal_date = as_of_date or _dt.date.today().isoformat()
+            self._dna_add_to_watch(hits, strategy, level=level,
+                                   add_date=_signal_date)
             self.db.mark_session_in_watchlist(session_id)
 
         self.scan_done.emit({
@@ -699,13 +723,19 @@ class Worker(QThread):
                                         else f"，新信号 {len(new_hits)} 只")
             + ("（历史日期对照，未自动进池）" if is_hist else ""))
 
-    def _dna_add_to_watch(self, hits, strategy, level=2):
+    def _dna_add_to_watch(self, hits, strategy, level=2, add_date=None):
         """DNA 精筛命中自动进池：已在池则更新 DNA 标注 + 升级 level，否则新增并标注来源。
         v0.7.4：原因中附加综合分与买点定级。
         v0.8.0：level=精筛层级（入参为 strategy.level，默认 2）。
+        v0.9.0：add_date = 用户选的信号日（end_date/as_of_date），保证与
+        scan_history.trade_date 一层粗筛入池日期对齐（修复二层精筛观察池
+        总是落到"今天"的 bug）。
         """
         if not hits:
             return
+        import datetime as _dt
+        if not add_date:
+            add_date = _dt.date.today().isoformat()
         active = {str(w["code"]) for w in self.db.list_watch()
                   if w["status"] in ("待审核", "观察中", "已开仓")}
         added = 0
@@ -721,12 +751,13 @@ class Worker(QThread):
                                   reason=f"策略「{strategy.get('name', '')}」DNA精筛命中"
                                          f"{note}",
                                   status="待审核",
+                                  add_date=add_date,    # v0.9.0：跟随信号日
                                   dna_score=h.dna_score,
                                   dna_template=h.dna_template,
                                   level=level)
                 added += 1
         if added:
-            self.status.emit(f"🆕 DNA精筛新命中 {added} 只已加入观察池（待审核）")
+            self.status.emit(f"🆕 DNA精筛新命中 {added} 只已加入观察池（待审核，{add_date}）")
 
     @staticmethod
     def _dna_watch_note(h):

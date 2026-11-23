@@ -8,14 +8,113 @@
 import datetime
 import logging
 import threading
+import time
 
 import pandas as pd
+import requests
 from pytdx.hq import TdxHq_API
 
 from config import (CONNECT_TIMEOUT, INDEX_CODES, MAX_BARS_PER_CALL,
                     QUOTE_BATCH, STOCK_PREFIXES, TDX_SERVERS)
 
 log = logging.getLogger("data_feed")
+
+# 东方财富日K接口：pytdx 公开服务器协议 2026-10-22 起全网不可用（21 台 TCP 可达、
+# 协议 0 可用），日K改走此后端 HTTP 兜底（fqt=1 前复权、沪/深通用）。
+EM_KLINE_URL = "https://push2his.eastmoney.com/api/qt/stock/kline/get"
+EM_HEADERS = {
+    "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                   "(KHTML, like Gecko) Chrome/120.0 Safari/537.36"),
+    "Referer": "https://quote.eastmoney.com/",
+}
+
+# 腾讯日K接口：东财被限频/封禁时的二级兜底（前复权，无成交额字段，按收盘价估算）
+TX_KLINE_URL = "https://web.ifzq.gtimg.cn/appstock/app/fqkline/get"
+
+# 新浪日K接口：最后一层兜底（成交量=股与 pytdx 一致；无成交额，按收盘价估算）
+SINA_KLINE_URL = ("https://money.finance.sina.com.cn/quotes_service/api/json_v2.php/"
+                  "CN_MarketData.getKLineData")
+
+# 通用熔断：按源名记录连续失败，熔断期内跳过该源（防止把可用源也打挂）
+_BREAKERS = {}
+_BREAKER_LOCK = threading.Lock()
+
+
+def _breaker_ok(name):
+    with _BREAKER_LOCK:
+        b = _BREAKERS.get(name)
+        return b is None or time.time() >= b["skip_until"]
+
+
+def _breaker_note(name, ok, limit=5, skip=300):
+    with _BREAKER_LOCK:
+        b = _BREAKERS.setdefault(name, {"streak": 0, "skip_until": 0.0})
+        if ok:
+            b["streak"] = 0
+            b["skip_until"] = 0.0
+        else:
+            b["streak"] += 1
+            if b["streak"] >= limit and b["skip_until"] <= time.time():
+                b["skip_until"] = time.time() + skip
+                log.warning("%s 日K连续失败，暂停 %d 秒", name, skip)
+
+# 东财熔断：并发高频请求会被限频断连，连续失败 5 次后暂停 10 分钟
+_EM_STATE = {"fail_streak": 0, "skip_until": 0.0}
+_EM_LOCK = threading.Lock()
+
+# pytdx 熔断：公开服务器协议全网下线时，连续失败 12 次后直接跳过 pytdx（避免
+# 每票最多 10s 的 recv 超时把全市场扫描拖到几十分钟），5 分钟后重试
+_PYTDX_STATE = {"fail_streak": 0, "skip_until": 0.0}
+_PYTDX_LOCK = threading.Lock()
+
+
+def _pytdx_usable():
+    with _PYTDX_LOCK:
+        return time.time() >= _PYTDX_STATE["skip_until"]
+
+
+def _pytdx_record(ok):
+    with _PYTDX_LOCK:
+        if ok:
+            _PYTDX_STATE["fail_streak"] = 0
+            _PYTDX_STATE["skip_until"] = 0.0
+        else:
+            _PYTDX_STATE["fail_streak"] += 1
+            if (_PYTDX_STATE["fail_streak"] >= 12
+                    and _PYTDX_STATE["skip_until"] <= time.time()):
+                _PYTDX_STATE["skip_until"] = time.time() + 300
+                log.warning("pytdx 行情服务器连续 12 次取数失败，5 分钟内直接走 HTTP 源")
+
+
+def _em_usable():
+    with _EM_LOCK:
+        return time.time() >= _EM_STATE["skip_until"]
+
+
+def _em_record(ok):
+    with _EM_LOCK:
+        if ok:
+            _EM_STATE["fail_streak"] = 0
+            _EM_STATE["skip_until"] = 0.0
+        else:
+            _EM_STATE["fail_streak"] += 1
+            if (_EM_STATE["fail_streak"] >= 5
+                    and _EM_STATE["skip_until"] <= time.time()):
+                _EM_STATE["skip_until"] = time.time() + 600
+                log.warning("东财日K连续失败，熔断 10 分钟，改走腾讯源")
+
+
+# 每线程一个 Session（连接复用）：并发扫描时高频新建 TLS 连接会被服务端限频断开
+_SESSION = threading.local()
+
+
+def _http_session():
+    s = getattr(_SESSION, "s", None)
+    if s is None:
+        s = requests.Session()
+        s.headers.update(EM_HEADERS)
+        _SESSION.s = s
+    return s
 
 
 def is_trading_time(now=None):
@@ -149,10 +248,25 @@ class DataFeed:
             else:
                 pairs.append((infer_market(c), str(c).zfill(6)))
 
+        if not _pytdx_usable():
+            # pytdx 全网不可用期间直接短路，避免每次刷新卡 10 秒接收超时
+            return pd.DataFrame(columns=["market", "code", "name", "price",
+                                         "last_close", "open", "high", "low",
+                                         "vol", "amount", "pct", "time"])
+
         rows = []
         for i in range(0, len(pairs), QUOTE_BATCH):
             batch = pairs[i:i + QUOTE_BATCH]
-            raw = self._call(self._api.get_security_quotes, batch) or []
+            try:
+                raw = self._call(self._api.get_security_quotes, batch) or []
+            except Exception as e:  # noqa: BLE001
+                log.debug("实时行情失败: %s", e)
+                _pytdx_record(False)
+                break
+            if not raw:
+                _pytdx_record(False)
+            else:
+                _pytdx_record(True)
             for q in raw:
                 try:
                     last_close = float(q.get("last_close") or 0)
@@ -196,17 +310,32 @@ class DataFeed:
         market = int(market if market is not None else infer_market(code))
         code = str(code).zfill(6)
         bars = []
-        start = 0
-        while start < count:
-            batch = self._call(self._api.get_security_bars, 4, market, code,
-                               start, min(MAX_BARS_PER_CALL, count - start))
-            if not batch:
-                break
-            bars.extend(batch)
-            if len(batch) < MAX_BARS_PER_CALL:
-                break
-            start += len(batch)
+        if _pytdx_usable():
+            try:
+                start = 0
+                while start < count:
+                    batch = self._call(self._api.get_security_bars, 4, market, code,
+                                       start, min(MAX_BARS_PER_CALL, count - start))
+                    if not batch:
+                        break
+                    bars.extend(batch)
+                    if len(batch) < MAX_BARS_PER_CALL:
+                        break
+                    start += len(batch)
+            except Exception as e:  # noqa: BLE001
+                log.debug("pytdx 日K失败 %s: %s，转 HTTP 兜底", code, e)
+            _pytdx_record(bool(bars))
         bars = bars[:count]
+
+        if not bars:
+            # pytdx 服务器协议不可用时的兜底：东财 HTTP 前复权日K。
+            # fqt=1 已是前复权口径，直接返回，不再经 core.adjust 二次复权。
+            df_http = self._get_daily_bars_http(code, market, count)
+            if df_http is not None and not df_http.empty:
+                self.last_adjust = "qfq"
+                return df_http
+            self.last_adjust = "none"
+            return (df_http if df_http is not None else pd.DataFrame())
 
         rows = []
         for b in bars:
@@ -240,6 +369,161 @@ class DataFeed:
         else:
             self.last_adjust = "none"
         return df
+
+    def _get_daily_bars_http(self, code, market, count=300):
+        """HTTP 兜底日K：东财（含真实成交额）→ 腾讯 → 新浪，逐层降级。
+
+        pytdx 公开服务器 2026-10-22 起协议全部不可用；各 HTTP 源高频并发会被
+        限频（东财断连、腾讯 501 反爬），故三层都带熔断。单位对齐 pytdx 缓存：
+        成交量=股；成交额：东财为真实值，腾讯/新浪按 收盘价×成交量 估算。
+        """
+        if _em_usable():
+            df = self._http_em_kline(code, market, count)
+            if df is not None and not df.empty:
+                return df
+        if _breaker_ok("腾讯"):
+            df = self._http_tx_kline(code, market, count)
+            if df is not None and not df.empty:
+                return df
+        if _breaker_ok("新浪"):
+            df = self._http_sina_kline(code, market, count)
+            if df is not None and not df.empty:
+                return df
+        return pd.DataFrame()
+
+    def _http_em_kline(self, code, market, count=300):
+        """东财日K（fqt=1 前复权，含成交额）。单位：vol=手→股 ×100。"""
+        secid = f"{1 if int(market) == 1 else 0}.{str(code).zfill(6)}"
+        params = {
+            "secid": secid, "klt": "101", "fqt": "1",
+            "lmt": str(max(int(count), 60)), "end": "20500101",
+            "fields1": "f1,f2,f3,f4,f5,f6",
+            "fields2": "f51,f52,f53,f54,f55,f56,f57",
+        }
+        last_err = None
+        for attempt in range(2):
+            try:
+                r = _http_session().get(EM_KLINE_URL, params=params, timeout=8)
+                data = (r.json() or {}).get("data") or {}
+                klines = data.get("klines") or []
+                if not klines:
+                    return pd.DataFrame()
+                rows = []
+                for line in klines:
+                    p = line.split(",")
+                    if len(p) < 7:
+                        continue
+                    rows.append({
+                        "date": p[0],
+                        "open": float(p[1]), "close": float(p[2]),
+                        "high": float(p[3]), "low": float(p[4]),
+                        "vol": float(p[5]) * 100,   # 手 -> 股，对齐 pytdx 口径
+                        "amount": float(p[6]),
+                    })
+                df = pd.DataFrame(rows)
+                if not df.empty:
+                    df = df.sort_values("date").reset_index(drop=True)
+                _em_record(True)
+                return df
+            except Exception as e:  # noqa: BLE001
+                last_err = e
+                # 连接被服务端断开（限频）：丢弃本线程连接，下次重建
+                if "RemoteDisconnected" in repr(e) or "ConnectionError" in repr(e):
+                    try:
+                        s_old = getattr(_SESSION, "s", None)
+                        if s_old is not None:
+                            s_old.close()
+                    except Exception:  # noqa: BLE001
+                        pass
+                    _SESSION.s = None
+                time.sleep(0.5 * (attempt + 1))
+        _em_record(False)
+        log.debug("%s 东财兜底失败: %s", code, last_err)
+        return pd.DataFrame()
+
+    def _http_tx_kline(self, code, market, count=300):
+        """腾讯日K兜底（qfq 前复权）。腾讯日K无成交额字段，按 收盘价×成交量 估算。"""
+        prefix = "sh" if int(market) == 1 else "sz"
+        symbol = f"{prefix}{str(code).zfill(6)}"
+        params = {"param": f"{symbol},day,,,{max(int(count), 60)},qfq"}
+        for attempt in range(2):
+            try:
+                r = _http_session().get(TX_KLINE_URL, params=params, timeout=8)
+                if r.status_code != 200:
+                    raise RuntimeError(f"HTTP {r.status_code}")
+                data = (r.json() or {}).get("data") or {}
+                item = data.get(symbol) or {}
+                bars = item.get("qfqday") or item.get("day") or []
+                rows = []
+                for b in bars:
+                    if not b or len(b) < 6:
+                        continue
+                    close = float(b[2])
+                    vol = float(b[5]) * 100        # 手 -> 股，对齐 pytdx 口径
+                    rows.append({
+                        "date": b[0], "open": float(b[1]), "close": close,
+                        "high": float(b[3]), "low": float(b[4]),
+                        "vol": vol,
+                        "amount": round(vol * close, 2),   # 估算（腾讯日K无成交额）
+                    })
+                df = pd.DataFrame(rows)
+                if not df.empty:
+                    df = df.sort_values("date").reset_index(drop=True)
+                    _breaker_note("腾讯", True)
+                return df
+            except Exception:  # noqa: BLE001
+                try:
+                    s_old = getattr(_SESSION, "s", None)
+                    if s_old is not None:
+                        s_old.close()
+                except Exception:  # noqa: BLE001
+                    pass
+                _SESSION.s = None
+                time.sleep(0.3 * (attempt + 1))
+        _breaker_note("腾讯", False)
+        return pd.DataFrame()
+
+    def _http_sina_kline(self, code, market, count=300):
+        """新浪日K兜底（最后一层）。成交量=股（与 pytdx 口径一致），无成交额按收盘价估算。"""
+        prefix = "sh" if int(market) == 1 else "sz"
+        symbol = f"{prefix}{str(code).zfill(6)}"
+        params = {"symbol": symbol, "scale": "240", "ma": "no",
+                  "datalen": str(max(int(count), 60))}
+        for attempt in range(2):
+            try:
+                r = _http_session().get(SINA_KLINE_URL, params=params, timeout=8)
+                if r.status_code != 200:
+                    raise RuntimeError(f"HTTP {r.status_code}")
+                bars = r.json() or []
+                rows = []
+                for b in bars:
+                    try:
+                        close = float(b["close"])
+                        vol = float(b["volume"])
+                        rows.append({
+                            "date": str(b["day"]), "open": float(b["open"]),
+                            "close": close, "high": float(b["high"]),
+                            "low": float(b["low"]), "vol": vol,
+                            "amount": round(vol * close, 2),  # 估算（新浪日K无成交额）
+                        })
+                    except (KeyError, TypeError, ValueError):
+                        continue
+                df = pd.DataFrame(rows)
+                if not df.empty:
+                    df = df.sort_values("date").reset_index(drop=True)
+                    _breaker_note("新浪", True)
+                return df
+            except Exception:  # noqa: BLE001
+                try:
+                    s_old = getattr(_SESSION, "s", None)
+                    if s_old is not None:
+                        s_old.close()
+                except Exception:  # noqa: BLE001
+                    pass
+                _SESSION.s = None
+                time.sleep(0.3 * (attempt + 1))
+        _breaker_note("新浪", False)
+        return pd.DataFrame()
 
     def _get_qfq_events(self, code, market):
         """取除权除息事件：优先本地缓存，无则拉服务器并存库。失败返回 None。"""
@@ -372,6 +656,17 @@ class DataFeed:
                 df["name"] = df["name"].astype(str).str.replace(" ", "")
         except Exception as e:  # noqa: BLE001
             log.warning("akshare 获取股票列表失败，退回 pytdx: %s", e)
+
+        if df is None or df.empty:
+            # 第二兜底：本机 stock_list 表缓存（历史 akshare 成功时写入，含沪市全量）
+            try:
+                if self.db is not None:
+                    cached = self.db.load_stock_list()
+                    if cached:
+                        df = pd.DataFrame(cached)
+                        log.info("股票列表走本机缓存：%d 只", len(df))
+            except Exception as e:  # noqa: BLE001
+                log.debug("读取股票列表缓存失败: %s", e)
 
         if df is None or df.empty:
             df = self._stock_list_from_pytdx()

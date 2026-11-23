@@ -10,6 +10,7 @@ from PyQt5.QtWidgets import (QAction, QApplication, QLabel, QMainWindow, QMenu,
                              QSystemTrayIcon, QTabWidget)
 
 from ui.alert_tab import AlertTab
+from ui.backtest_tab import BacktestTab
 from ui.calendar_tab import CalendarTab
 from ui.scan_center import ScanCenter
 from ui.strategy_tab import StrategyTab
@@ -55,20 +56,25 @@ class MainWindow(QMainWindow):
         self.alert_tab = AlertTab(worker, db, names={}, parent=self)
         self.strategy_tab = StrategyTab(
             db, on_run_scan=self._run_strategy_manual,
-            on_changed=self._on_strategies_changed, parent=self)
+            on_changed=self._on_strategies_changed,
+            on_quick_backtest=self._on_quick_backtest, parent=self)
         self.scan_center = ScanCenter(
             worker, db,
             on_watch_changed=self.watch_tab._load_watch, parent=self)
         self.trade_tab = TradeTab(db, self)
+        self.backtest_tab = BacktestTab(worker, db, parent=self)
         tabs.addTab(self.timing_tab, "🕐 择时")
         tabs.addTab(self.calendar_tab, "📅 行情日历")
         tabs.addTab(self.watch_tab, "👀 观察池")
         tabs.addTab(self.alert_tab, "🔔 提醒设置")
         tabs.addTab(self.strategy_tab, "🎯 策略管理")
         tabs.addTab(self.scan_center, "🔍 选股模块")
+        tabs.addTab(self.backtest_tab, "📊 策略回测")
         tabs.addTab(self.trade_tab, "📒 交易记录")
         self.setCentralWidget(tabs)
         tabs.setCurrentWidget(self.timing_tab)   # v0.8.6：启动即落在择时页
+        # v0.9.0：保留 self.tabs 引用，供「策略管理 → 策略回测」快速跳转
+        self._tabs = tabs
         # v0.8.8：极简 TimingTab 在 __init__ 已自动恢复上次选择,无需 refresh
         # 移除旧版的 self.timing_tab.refresh() 调用
 
@@ -175,6 +181,27 @@ class MainWindow(QMainWindow):
 
     def _on_strategies_changed(self):
         self.scan_center.refresh_strategies()
+        # v0.9.0：策略管理变化时同步刷新回测页的策略下拉
+        if hasattr(self, "backtest_tab") and self.backtest_tab is not None:
+            try:
+                self.backtest_tab.refresh_strategies()
+            except Exception as e:  # noqa: BLE001
+                log.warning("刷新回测页策略列表失败: %s", e)
+
+    # ------------------------------------------------------------ v0.9.0 策略回测联动
+    def _on_quick_backtest(self, strategy_id: int, strategy_name: str = ""):
+        """策略管理页「🔍 快速回测」入口：切到回测页签并选中策略。"""
+        try:
+            if hasattr(self, "_tabs") and self._tabs is not None:
+                idx = self._tabs.indexOf(self.backtest_tab)
+                if idx >= 0:
+                    self._tabs.setCurrentIndex(idx)
+            self.backtest_tab.set_selected_strategy(strategy_id, strategy_name)
+            self.statusBar().showMessage(
+                f"🔍 已切换到策略回测：{strategy_name or f'#{strategy_id}'}", 6000)
+        except Exception as e:  # noqa: BLE001
+            log.warning("快速回测跳转失败: %s", e)
+            self.statusBar().showMessage(f"⚠️ 快速回测跳转失败: {e}", 5000)
 
     # ------------------------------------------------------------ 生命周期
     def closeEvent(self, event):

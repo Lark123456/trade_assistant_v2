@@ -914,6 +914,129 @@ known_issues:
 
 ## 八、本次更新记录
 
+- **更新日期**：2026-11-24（v0.10.4）
+- **更新原因**：用户希望「把自动扫描的数据交给 AI 处理，生成基于自己策略的综合日报再推送」
+- **更新内容**：
+  - 新增 `ai_summary.py`：任意 **OpenAI 兼容**端点（方舟 / DeepSeek / Moonshot / 本地 Ollama，
+    改 Base URL 即可）生成日报点评。核心三点：
+    - `SYSTEM_PROMPT` 注入用户策略语义（B1海选=白线>黄线且 J<13 的海选网、B2=次日确认、
+      砖型/单针=形态辅助、B1十张图=DNA骨架+微观综合分≥80、买点定级 SB1>B1底仓），
+      并强约束「纯文本 ≤500 字、只用给定数据、禁止编造、不给买卖点位」；
+    - `build_brief()` 只喂汇总（日期/市场宽度/各策略命中数/每策略前 N 只/二层评分），
+      并自动生成 **【跨策略共振】名单**（同一只票被 ≥2 个策略命中的 top10，
+      是上下文里信息密度最高的一段），上限 4000 字，省 token；
+      二层行若没有综合分（策略执行失败仍入库的情况）退回普通写法，避免出现「综合- 骨架-」；
+    - `_post_completion()` 直连 `/chat/completions`，401/403/404/429 等翻成中文可操作提示；
+      `_tidy()` 清掉模型偶尔带出的 Markdown 记号，保证飞书纯文本观感一致。
+  - `ui/scan_center.py`：「自动日报」页新增 AI 配置两行（启用 / Base URL / 模型 /
+    API Key / 额外要求 / **测试 AI**）；`_run_daily_report` 拆出 `_compose_and_push()`，
+    把「AI 点评 → 落盘 → 推送」整体放工作线程，经 `daily_log_line` / `daily_doc_ready`
+    / `report_sent` 信号回主线程，界面不卡；AI 失败自动退回纯数据版继续推送。
+  - 配置键：`ai_enabled` / `ai_base_url` / `ai_api_key` / `ai_model` / `ai_max_tokens` /
+    `ai_timeout` / `ai_prompt_extra`（`AIConfig.load/save`）。
+  - 文档新增「五、AI 点评」章节（端点对照表、喂什么、怎么写、失败处理、密钥存放提醒）。
+- **验证**：`test_daily_report.py` 85 → **112 项全部通过**，新增 27 项：endpoint 拼接、
+  配置校验、`build_brief` 分层与截断、跨策略共振名单、二层无分数回退、
+  请求端点/鉴权头/模型与消息体、System 提示含策略语义与防编造约束、Markdown 清理、
+  token 用量解析、401 问候语、异常结构不崩、`test_ai`、AI 配置回填与保存。
+  真实库 2026-11-23：上下文 1862 字 / 系统提示 805 字，共振名单识别出
+  「300654 世纪天鸿：砖型图翻红、B2普通、B1十张图（二层）」等 10 组。
+
+- **更新日期**：2026-11-24（v0.10.3）
+- **更新原因**：用户提问「自动日报是只跑当天吗」——确认原实现 `start=end=今天` 后，暴露出
+  三个空跑场景：① 法定节假日无当日K线 → 0 命中空报告；② 收盘数据未落地 → 每只票都因
+  「当日无数据」被静默跳过；③ 断档不补。用户选择「自动回退到最近有数据的交易日」
+- **更新内容**：
+  - `daily_report.py` 新增 `resolve_scan_date(db, probe=None, today=None)` + `PROBE_CODES`：
+    缓存有今天 → 用今天；否则探测 600519/000001/601318 的最新K线日期；探测到今天 → 用今天；
+    只探测到更早日期 → **回退到该交易日**并在日志说明；探测全失败 → 用缓存最近日。
+  - `database.py` 新增 `count_cached_bars_on(day)`：某日有多少只股票已有日K（判断数据落地）。
+  - `ui/scan_center.py`：新增 `scan_date_ready` 信号与 `_probe_scan_date()`（**工作线程探测**，
+    自带独立 `DataFeed` 连接，避免与 worker 线程抢 pytdx 连接）；`_start_daily_job` 改为
+    「先定信号日再扫描」；`_on_scan_date_ready()` 落定 `_daily_day` 并提交扫描；
+    `_on_auto_scan_done()` 回报当日日K覆盖度（<1000 只给「结果会偏少」提示）；
+    `_run_daily_report(auto, day=None)` 支持显式日期（手动日报按钮仍取今天）。
+  - 文档补充「信号日怎么定」小节。
+- **验证**：`test_daily_report.py` 77 → **85 项全部通过**（新增：探测到上一交易日回退、
+  探测到今天用今天、探测不可用按缓存最近日、探测抛异常不炸、缓存含今天走捷径、
+  `count_cached_bars_on` 统计）。
+
+- **更新日期**：2026-11-24（v0.10.2）
+- **更新原因**：用户指出「我之前跑通的方式是 app_id + app_secret + receive_id」，说明他现在用的是
+  **自建应用机器人**（Open API），而不是自定义机器人 webhook；`oc_...` 是群 chat_id 而非 hook token，
+  v0.10.1 的「补全 Webhook」对其无效
+- **更新内容**：
+  - `feishu.py` 重构为双通道：
+    - **应用机器人**：`get_tenant_token()`（`/open-apis/auth/v3/tenant_access_token/internal`，
+      进程内缓存 + 提前 2 分钟过期 + token 失效自动重试一次）→
+      `send_app_message()`（`/open-apis/im/v1/messages?receive_id_type=`，
+      `content` 按 IM API 要求序列化为 **JSON 字符串**；支持 chat_id/open_id/user_id/email）。
+    - **自定义机器人**：原 webhook 通道保留（含签名与地址补全）。
+    - 统一入口 `send_message(creds, ...)`、`is_configured()`、`describe()`（脱敏）、`test_message()`；
+      旧 `send_feishu`/`test_feishu` 保留兼容。
+    - 错误码提示扩充：token 侧 10003/10014/40004；IM 侧 230001/230002/230006/230013/
+      99991663‑72 等，均给中文可操作建议。
+  - `daily_report.py`：配置新增 `mode`(app/webhook) / `app_id` / `app_secret` /
+    `receive_id` / `receive_id_type`，settings 键 `feishu_mode` / `feishu_app_id` /
+    `feishu_app_secret` / `feishu_receive_id` / `feishu_receive_id_type`；
+    新增 `credentials()`；**老配置无 feishu_mode 时按是否有 webhook 推断**。
+  - `ui/scan_center.py`：「自动日报」页新增「推送方式」下拉 + 应用机器人三行输入，
+    按方式自动启用/置灰对应输入框；推送/测试改走 `send_message` / `test_message`。
+  - `docs/自动日报与飞书推送.md`：重写配置章节为 A（应用机器人）/ B（Webhook）两套流程，
+    补充权限开通、发布版本、拉群、chat_id 获取，以及新错误码排查表。
+- **验证**：`test_daily_report.py` 51 → **77 项全部通过**，新增用例：应用机器人发送成功、
+  先换 token 再发消息、token 请求参数、IM 地址与 Authorization 头、receive_id 透传、
+  IM content 为 JSON 字符串、token 缓存不重复换取、纯文本走 text、230002 提示、
+  凭证校验、describe 不泄露 secret、界面推送方式回填与启用关系、老配置推断 webhook。
+
+- **更新日期**：2026-11-23（v0.10.1 修复）
+- **更新原因**：用户实测「测试发送」报 `✗ 网络异常: Invalid URL 'oc_b41562840b49ca979df302e9a5acff5a':
+  No scheme supplied` —— 只填了 webhook 末尾的 token，没有完整地址
+- **更新内容**：
+  - `feishu.py` 新增 `normalize_webhook()`：完整 URL / `open-apis/bot/v2/hook/xxx` /
+    裸 token（`oc_xxx`）/ 缺协议域名 四种形态统一补全为
+    `https://open.feishu.cn/open-apis/bot/v2/hook/...`；`_post` 入口统一调用。
+  - `feishu.py` 新增飞书错误码 → 中文可操作提示（19001 地址不对 / 19003 机器人被移出群 /
+    19021 签名校验失败 / 19022 IP 白名单 / 19024 关键词不匹配）。
+  - `ui/scan_center.py`：保存配置时自动补全并回填输入框；输入框提示语改为
+    「只粘最后那串 oc_xxx 也能自动补全」；`mask_webhook` 日志按补全后的地址打码。
+  - `docs/自动日报与飞书推送.md` 补充该故障的排查表。
+- **验证**：`test_daily_report.py` 44 → **51 项全部通过**（新增：裸 token 补全 / 只粘路径补全 /
+  完整 URL 原样 / 缺协议补全 / 空白视为未配置 / 裸 token 直接发送走补全地址 / 错误码提示）。
+
+- **更新日期**：2026-11-23
+- **更新原因**：用户要求「可以设置定时每天自动进行全市场扫描，然后把所有扫描结果自动汇总成一个文档，
+  通过飞书机器人发到飞书」，且功能放在选股模块下
+- **更新内容**：
+  - **新增「自动日报」子页（v0.10.0）**：`ui/scan_center.py` 由三子页扩为四子页；新页签含
+    启用开关 / 执行时间 / 仅工作日 / 启动补跑 / 飞书 Webhook / 签名密钥 / 每策略条数 /
+    内容开关 / 保存配置 / 立即扫描并推送 / 只生成日报并推送 / 运行日志。
+  - **`daily_report.py`（新）**：`DailyReportConfig`（配置读写到 settings，键前缀 `daily_report_*`
+    / `feishu_*`）、`build_daily_report`（按天汇总 scan_history → Markdown + 飞书行）、
+    `should_fire`（定时判定，含 2 小时宽限与「启动补跑」）、`save_report`（写 `reports/日报-YYYY-MM-DD.md`）。
+    同一策略当天多次扫描**只取最近一次会话**，避免重复计数。
+  - **`feishu.py`（新）**：飞书自定义机器人推送，支持 `msg_type=post` 富文本 +
+    可选签名校验（HMAC-SHA256 → base64），超 6000 字截断、失败自动降级纯文本重试；
+    配置 `feishu_webhook` / `feishu_secret`。
+  - **`workers.py`**：新增 `auto_scan_done` 信号，在 `auto_scan` 的 `finally` 中发出
+    （含 mode/hits/日期区间/是否取消），供日报在「全部策略 + 二层串联」真正结束后收尾；
+    `all_hits`/`mode` 提到 `try` 之前，异常时也能正常发信号。
+  - **`database.py`**：新增 `get_market_breadth(day)`（市场宽度：涨跌家数/平均涨幅）；
+    迁移新增表达式索引 `idx_scan_history_day(COALESCE(trade_date, date(scan_time)))`。
+  - **`ui/scan_center.py` 配套改造**：`_run_auto` 支持 `start_date/end_date/silent`
+    （定时任务固定信号日=当天、不弹提示框、不抢页签）；`_on_error` 在定时任务失败时复位状态；
+    配置改为内存缓存，避免每 30 秒 tick 反复读库；飞书推送在后台线程执行，
+    经 `report_sent` 信号回主线程。
+  - **文档**：新增 `docs/自动日报与飞书推送.md`（配置步骤、定时规则、报告结构、常见问题）。
+- **验证**：新增 `test_daily_report.py` **44 项全部通过**（定时判定 9 项 / 飞书消息体与签名 9 项 /
+  日报汇总 11 项 / 落盘 2 项 / 配置读写 4 项 / 页签 offscreen 7 项）；
+  `test_multi_scan.py` 11 项通过；`_smoke_v900/test_db_migration.py` 通过（旧库升级 + 真实库加载）；
+  真实库 2026-11-23 生成日报：8 个策略、命中 953 只（一层 925 / 二层 28）、
+  市场宽度 涨 4306 / 跌 780 / 均 +2.79%，文档 6084 B，耗时 0.6s；
+  索引后按信号日查询 7.16s → 0.02s。
+  注：`test_headless.py` 在 `test_scan` 处因**公开行情服务器不可用**（`get_quotes` 返回无 `pct` 列）
+  中断，与本次改动无关（既有环境问题）。
+
 - **更新日期**：2026-08-17
 - **更新原因**：用户反馈观察池 Tab 有「较加入价%」，但一层粗筛和二层精筛 Tab 没有，要求统一展示
 - **更新内容**：

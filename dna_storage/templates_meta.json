@@ -97,5 +97,16 @@
     "created_at": "2026-08-17T23:12:28",
     "_feature_version": 2,
     "_npz_key": "t8"
+  },
+  "新乡化纤_底部爆量回踩": {
+    "code": "000949",
+    "name": "新乡化纤_底部爆量回踩",
+    "strategy": "超跌反弹",
+    "start": "2026-07-20",
+    "end": "2026-08-19",
+    "len_days": 23,
+    "created_at": "2026-09-07T12:57:24",
+    "_feature_version": 2,
+    "_npz_key": "t9"
   }
 }

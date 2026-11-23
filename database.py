@@ -320,6 +320,21 @@ class Database:
         if "level" not in wcols:
             cur.execute("ALTER TABLE watch_pool ADD COLUMN level INTEGER NOT NULL DEFAULT 1")
             log.info("数据库升级：watch_pool 表新增 level 列（生效层级）")
+        # v0.9.0：策略回测统计列（最新一次回测的胜率/盈亏比/前瞻收益，用于策略管理列表标签展示）
+        scols2 = {r[1] for r in cur.execute("PRAGMA table_info(strategies)").fetchall()}
+        for col, ddl in (
+                ("backtest_win_rate", "ALTER TABLE strategies ADD COLUMN backtest_win_rate REAL"),
+                ("backtest_profit_loss_ratio", "ALTER TABLE strategies ADD COLUMN backtest_profit_loss_ratio REAL"),
+                ("backtest_total_signals", "ALTER TABLE strategies ADD COLUMN backtest_total_signals INTEGER"),
+                ("backtest_avg_ret", "ALTER TABLE strategies ADD COLUMN backtest_avg_ret REAL"),
+                ("backtest_avg_holding_days", "ALTER TABLE strategies ADD COLUMN backtest_avg_holding_days REAL"),
+                ("backtest_forward_returns", "ALTER TABLE strategies ADD COLUMN backtest_forward_returns TEXT"),
+                ("backtest_config", "ALTER TABLE strategies ADD COLUMN backtest_config TEXT"),
+                ("backtest_updated_at", "ALTER TABLE strategies ADD COLUMN backtest_updated_at TEXT"),
+        ):
+            if col not in scols2:
+                cur.execute(ddl)
+                log.info("数据库升级：strategies 表新增 %s 列（v0.9.0 策略回测统计）", col)
 
         # v0.7.0：前复权全量切换 —— 首次切换时清空旧日K缓存（旧缓存为不复权口径）
         row = cur.execute("SELECT value FROM settings WHERE key='bars_adjust'").fetchone()
@@ -328,6 +343,13 @@ class Database:
             cur.execute("INSERT INTO settings(key,value) VALUES('bars_adjust','qfq') "
                         "ON CONFLICT(key) DO UPDATE SET value=excluded.value")
             log.info("数据库升级 v0.7.0：日K缓存已清空，切换到前复权口径（bars_adjust=qfq）")
+
+        # v0.10.0：按「信号日」查询的表达式索引。
+        # list_scan_history(day=...)/list_scan_dates 都用 COALESCE(trade_date,
+        # date(scan_time)) 过滤，没有索引时 8 万行要全表扫 + 排序（实测 7 秒，
+        # 选股页每次刷新和日报都受影响）。
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_scan_history_day "
+                    "ON scan_history(COALESCE(trade_date, date(scan_time)))")
 
     @contextmanager
     def _cursor(self):
@@ -956,6 +978,51 @@ class Database:
                 (f"{year:04d}-{month:02d}",)).fetchall()
         return [r["d"] for r in rows if r["d"]]
 
+    def count_cached_bars_on(self, day):
+        """某日有多少只股票在本地缓存里已有日K（v0.10.3，判断该日数据是否落地）。"""
+        with self._cursor() as cur:
+            row = cur.execute(
+                "SELECT COUNT(DISTINCT code) AS c FROM daily_bars_cache WHERE date=?",
+                (str(day)[:10],)).fetchone()
+        return int(row["c"] or 0) if row else 0
+
+    def get_market_breadth(self, day):
+        """某交易日的市场宽度（v0.10.0，供选股日报使用）。
+
+        以 daily_bars_cache 的「该日收盘 vs 上一交易日收盘」统计，
+        只取目标日前后 30 天窗口，避免全表窗口排序。
+
+        返回 {total, up, down, flat, avg_pct}；该日无缓存数据时返回 None。
+        """
+        sql = (
+            "WITH d AS ("
+            "  SELECT code, date, close,"
+            "         LAG(close) OVER (PARTITION BY code ORDER BY date) AS prev"
+            "  FROM daily_bars_cache"
+            "  WHERE date <= ? AND date >= date(?, '-30 day')"
+            "), t AS ("
+            "  SELECT close, prev FROM d"
+            "  WHERE date = ? AND prev IS NOT NULL AND prev > 0"
+            ") "
+            "SELECT COUNT(*) AS total,"
+            "       SUM(CASE WHEN close > prev THEN 1 ELSE 0 END) AS up,"
+            "       SUM(CASE WHEN close < prev THEN 1 ELSE 0 END) AS down,"
+            "       SUM(CASE WHEN close = prev THEN 1 ELSE 0 END) AS flat,"
+            "       AVG((close / prev - 1) * 100) AS avg_pct "
+            "FROM t"
+        )
+        with self._cursor() as cur:
+            row = cur.execute(sql, (day, day, day)).fetchone()
+        if not row or not row["total"]:
+            return None
+        return {
+            "total": int(row["total"]),
+            "up": int(row["up"] or 0),
+            "down": int(row["down"] or 0),
+            "flat": int(row["flat"] or 0),
+            "avg_pct": round(float(row["avg_pct"] or 0), 3),
+        }
+
     def list_latest_layer_hits(self, layer=1, limit=500, parent_strategy_id=None,
                               strategy_ids=None):
         """最近一次指定层（1=粗筛 2=DNA精筛）扫描会话的命中列表。
@@ -1006,6 +1073,89 @@ class Database:
         sql += " GROUP BY code, strategy_id"
         with self._cursor() as cur:
             rows = cur.execute(sql, args).fetchall()
+        return [dict(r) for r in rows]
+
+    # -------------------------------------------------- 策略回测统计（v0.9.0）
+    def save_backtest_stats(self, strategy_id, win_rate=None, profit_loss_ratio=None,
+                            total_signals=None, avg_ret=None, avg_holding_days=None,
+                            forward_returns=None, config=None, raw=None):
+        """写入/更新某条策略的回测统计（策略管理列表中以标签形式展示）。
+
+        - win_rate / profit_loss_ratio / avg_ret 等数值字段独立可空；
+        - forward_returns: dict（如 {'1':{'pct_avg':..,'win_rate':..},...}），存为 JSON
+        - config: dict，存为 JSON
+        - raw: dict，原始统计快照（含 stats/exit_reason_dist 等）便于后续溯源
+
+        每次调用都会写一条新的 backtest_stats 历史记录（保留时间序列）；
+        最新数值同步到 strategies 表的回测展示列。
+        """
+        import datetime
+        now = datetime.datetime.now().isoformat(timespec="seconds")
+        fwd_json = json.dumps(forward_returns or {}, ensure_ascii=False)
+        cfg_json = json.dumps(config or {}, ensure_ascii=False)
+        raw_json = json.dumps(raw or {}, ensure_ascii=False)
+        with self._cursor() as cur:
+            # 1) 历史表：每次保存都留痕
+            cur.execute(
+                "CREATE TABLE IF NOT EXISTS strategy_backtest ("
+                "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                "strategy_id INTEGER,"
+                "win_rate REAL, profit_loss_ratio REAL,"
+                "total_signals INTEGER, avg_ret REAL, avg_holding_days REAL,"
+                "forward_returns TEXT, config TEXT, raw TEXT,"
+                "created_at TEXT)"
+            )
+            cur.execute(
+                "INSERT INTO strategy_backtest(strategy_id,win_rate,profit_loss_ratio,"
+                "total_signals,avg_ret,avg_holding_days,forward_returns,config,raw,"
+                "created_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                (strategy_id, win_rate, profit_loss_ratio, total_signals, avg_ret,
+                 avg_holding_days, fwd_json, cfg_json, raw_json, now))
+            # 2) strategies 表同步最新展示列（仅展示用，不参与扫描）
+            cur.execute(
+                "UPDATE strategies SET backtest_win_rate=?, backtest_profit_loss_ratio=?,"
+                "backtest_total_signals=?, backtest_avg_ret=?, backtest_avg_holding_days=?,"
+                "backtest_forward_returns=?, backtest_config=?, backtest_updated_at=? "
+                "WHERE id=?",
+                (win_rate, profit_loss_ratio, total_signals, avg_ret, avg_holding_days,
+                 fwd_json, cfg_json, now, strategy_id))
+
+    def get_latest_backtest_stats(self, strategy_id):
+        """读取某条策略最近的回测统计快照（dict）；无则返回 None。"""
+        import json as _json
+        with self._cursor() as cur:
+            cur.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='strategy_backtest'")
+            if cur.fetchone() is None:
+                return None
+            row = cur.execute(
+                "SELECT * FROM strategy_backtest WHERE strategy_id=? "
+                "ORDER BY id DESC LIMIT 1", (strategy_id,)).fetchone()
+        if not row:
+            return None
+        d = dict(row)
+        for k in ("forward_returns", "config", "raw"):
+            if d.get(k):
+                try:
+                    d[k] = _json.loads(d[k])
+                except (ValueError, TypeError):
+                    d[k] = {}
+            else:
+                d[k] = {}
+        return d
+
+    def list_backtest_history(self, strategy_id, limit=20):
+        """列出某策略的历史回测记录（新→旧）。"""
+        with self._cursor() as cur:
+            cur.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='strategy_backtest'")
+            if cur.fetchone() is None:
+                return []
+            rows = cur.execute(
+                "SELECT id, strategy_id, win_rate, profit_loss_ratio, total_signals,"
+                " avg_ret, avg_holding_days, created_at FROM strategy_backtest "
+                "WHERE strategy_id=? ORDER BY id DESC LIMIT ?",
+                (strategy_id, limit)).fetchall()
         return [dict(r) for r in rows]
 
     # -------------------------------------------------------------- K线缓存

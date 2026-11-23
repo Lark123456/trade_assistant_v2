@@ -17,7 +17,7 @@ from ui.models import PandasModel
 MODE_LABELS = {"intraday": "盘中重点", "batch": "盘前盘后全市场", "manual": "仅手动"}
 KIND_LABELS = {"formula": "通达信公式", "indicator": "指标存档", "dna": "DNA精筛"}
 
-STRATEGY_COLUMNS = ["id", "编号", "name", "TDX简称", "类型", "描述", "节奏", "状态", "updated_at"]
+STRATEGY_COLUMNS = ["id", "编号", "name", "TDX简称", "类型", "描述", "节奏", "状态", "胜率%", "盈亏比", "updated_at"]
 INDICATOR_COLUMNS = ["id", "编号", "name", "分类", "描述", "updated_at"]
 
 
@@ -628,11 +628,13 @@ class ScanDateDialog(QDialog):
 
 
 class StrategyTab(QWidget):
-    def __init__(self, db, on_run_scan=None, on_changed=None, parent=None):
+    def __init__(self, db, on_run_scan=None, on_changed=None,
+                 on_quick_backtest=None, parent=None):
         super().__init__(parent)
         self.db = db
         self.on_run_scan = on_run_scan
         self.on_changed = on_changed
+        self.on_quick_backtest = on_quick_backtest
         self._build_ui()
         self._load()
 
@@ -668,8 +670,14 @@ class StrategyTab(QWidget):
             "区别于选股模块的「盘前/盘后全市场扫描」：后者批量运行所有启用的"
             "「盘前盘后全市场」节奏策略")
         run_btn.clicked.connect(self._run)
+        # v0.9.0：「快速回测」联动按钮——切换到策略回测 Tab 并选中本策略
+        self.quick_backtest_btn = QPushButton("🔍 快速回测")
+        self.quick_backtest_btn.setToolTip(
+            "切换到「📊 策略回测」页签，并对当前选中的策略执行回测\n"
+            "（基于该策略的历史信号，独立评估胜率、盈亏比、前瞻收益）")
+        self.quick_backtest_btn.clicked.connect(self._quick_backtest)
         for b in (add_btn, edit_btn, toggle_btn, del_btn, dna_btn, refresh_btn,
-                  diag_btn, doc_btn, ver_btn, run_btn):
+                  diag_btn, doc_btn, ver_btn, run_btn, self.quick_backtest_btn):
             bar.addWidget(b)
         bar.addStretch(1)
         root.addLayout(bar)
@@ -724,6 +732,11 @@ class StrategyTab(QWidget):
                     "updated_at": r.get("updated_at", ""),
                 })
             else:
+                wr = r.get("backtest_win_rate")
+                plr = r.get("backtest_profit_loss_ratio")
+                # v0.9.0：策略管理页以「胜率 X%」标签展示最近一次回测结果
+                win_rate_txt = f"{wr:.1f}%" if wr is not None else "—"
+                pl_ratio_txt = (f"{plr:.2f}" if plr is not None else "—")
                 strats.append({
                     "id": r["id"], "编号": r.get("code", ""), "name": r["name"],
                     "TDX简称": r.get("tdx_alias") or "",
@@ -731,6 +744,8 @@ class StrategyTab(QWidget):
                     "描述": desc,
                     "节奏": MODE_LABELS.get(r.get("scan_mode"), r.get("scan_mode")),
                     "状态": "启用" if r.get("enabled") else "停用",
+                    "胜率%": win_rate_txt,
+                    "盈亏比": pl_ratio_txt,
                     "updated_at": r.get("updated_at", ""),
                 })
         sdf = pd.DataFrame(strats)
@@ -816,6 +831,30 @@ class StrategyTab(QWidget):
         start_date, end_date = dlg.date_range()
         if self.on_run_scan:
             self.on_run_scan(st, start_date, end_date)
+
+    # v0.9.0：策略管理 → 策略回测 联动
+    def _quick_backtest(self):
+        """策略管理页「🔍 快速回测」按钮：切到回测页签并选中当前策略。"""
+        st = self._selected()
+        if st is None:
+            QMessageBox.information(self, "提示", "请先选择策略")
+            return
+        if st.get("kind") == "dna":
+            QMessageBox.information(self, "提示",
+                                    "DNA 策略暂不支持纯公式回测，请在策略管理页"
+                                    "添加公式类策略后再试。")
+            return
+        if not self.on_quick_backtest:
+            QMessageBox.information(
+                self, "提示",
+                "未配置回测页签入口（on_quick_backtest 未设置），"
+                "请手动打开「📊 策略回测」页签并选择策略。")
+            return
+        try:
+            self.on_quick_backtest(int(st["id"]), st.get("name", ""))
+        except Exception as e:  # noqa: BLE001
+            log.warning("快速回测跳转失败: %s", e)
+            QMessageBox.warning(self, "跳转失败", str(e))
 
     # ------------------------------------------------------------ 内置导入
     # v0.8.0：移除「导入内置」UI 入口——所有策略（含原内置策略与用户新建策略）
