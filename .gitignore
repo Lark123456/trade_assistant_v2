@@ -43,3 +43,6 @@ _probe.txt
 archive/
 策略备份-*.json
 *策略备份*.json
+
+# 导入模具库时自动生成的时间戳备份
+*.bak-*
