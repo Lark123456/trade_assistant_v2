@@ -439,8 +439,8 @@ check("请求带 Bearer Key",
 check("请求体含模型与消息",
       ai_state["payload"]["model"] == "doubao-test"
       and len(ai_state["payload"]["messages"]) == 2)
-check("System 提示里写明了策略体系与防编造约束",
-      "B1海选" in ai_state["payload"]["messages"][0]["content"]
+check("System 提示定义策略卡契约与防编造约束",
+      "策略卡" in ai_state["payload"]["messages"][0]["content"]
       and "不得编造" in ai_state["payload"]["messages"][0]["content"])
 check("User 提示里带上了数据",
       "命中合计" in ai_state["payload"]["messages"][1]["content"])

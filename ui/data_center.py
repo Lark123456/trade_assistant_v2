@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import logging
 
-from PyQt5.QtCore import QThread, Qt, pyqtSignal
-from PyQt5.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox,
-                             QHBoxLayout, QHeaderView, QLabel, QLineEdit,
-                             QMessageBox, QPlainTextEdit, QPushButton,
-                             QSplitter, QTableWidget, QTableWidgetItem,
-                             QVBoxLayout, QWidget)
+from PyQt5.QtCore import QDate, QThread, Qt, pyqtSignal
+from PyQt5.QtGui import QFont
+from PyQt5.QtWidgets import (QAbstractItemView, QApplication, QCheckBox,
+                             QComboBox, QDateEdit, QDialog, QHBoxLayout,
+                             QHeaderView, QLabel, QLineEdit, QMessageBox,
+                             QPlainTextEdit, QPushButton, QSplitter,
+                             QTableWidget, QTableWidgetItem, QVBoxLayout,
+                             QWidget)
 
 log = logging.getLogger("data_center")
 
@@ -19,6 +21,66 @@ TYPE_LABELS = {
     "region": "地域",
     "custom": "自定义",
 }
+
+
+class AIContextDialog(QDialog):
+    """预览将随日报发送给模型的上下文（不含系统提示）。"""
+
+    def __init__(self, db, parent=None):
+        super().__init__(parent)
+        self.db = db
+        self.setWindowTitle("AI 上下文预览")
+        self.resize(900, 640)
+
+        root = QVBoxLayout(self)
+
+        bar = QHBoxLayout()
+        bar.addWidget(QLabel("日期:"))
+        self.date_edit = QDateEdit(QDate.currentDate())
+        self.date_edit.setCalendarPopup(True)
+        self.date_edit.setDisplayFormat("yyyy-MM-dd")
+        self.date_edit.dateChanged.connect(self.generate)
+        bar.addWidget(self.date_edit)
+        gen_btn = QPushButton("重新生成")
+        gen_btn.clicked.connect(self.generate)
+        bar.addWidget(gen_btn)
+        copy_btn = QPushButton("复制全文")
+        copy_btn.clicked.connect(
+            lambda: QApplication.clipboard().setText(self.text.toPlainText()))
+        bar.addWidget(copy_btn)
+        bar.addStretch(1)
+        self.count_label = QLabel("")
+        self.count_label.setStyleSheet("color:#666;")
+        bar.addWidget(self.count_label)
+        root.addLayout(bar)
+
+        tip = QLabel("这段文本就是日报 AI 点评时随用户消息发送的内容（不含系统提示）。"
+                     "如果 AI 说得不对，先看这里：是数据没给到，还是模型理解偏了。")
+        tip.setStyleSheet("color:#888;font-size:11px;")
+        tip.setWordWrap(True)
+        root.addWidget(tip)
+
+        self.text = QPlainTextEdit()
+        self.text.setReadOnly(True)
+        font = QFont("Consolas")
+        font.setStyleHint(QFont.Monospace)
+        self.text.setFont(font)
+        root.addWidget(self.text, 1)
+
+        self.generate()
+
+    def generate(self):
+        day = self.date_edit.date().toString("yyyy-MM-dd")
+        try:
+            from ai_context import build_context
+            from daily_report import build_daily_report
+            rep = build_daily_report(self.db, day=day, max_per_strategy=10)
+            ctx = build_context(self.db, rep, max_per_strategy=10)
+        except Exception as e:  # noqa: BLE001
+            log.exception("生成 AI 上下文失败")
+            ctx = f"生成失败：{type(e).__name__}: {e}"
+        self.text.setPlainText(ctx)
+        self.count_label.setText(f"{len(ctx):,} 字")
 
 
 class BoardSyncThread(QThread):
@@ -86,6 +148,11 @@ class DataCenterTab(QWidget):
         self.sync_btn = QPushButton("同步东财板块")
         self.sync_btn.clicked.connect(self._start_sync)
         bar.addWidget(self.sync_btn)
+
+        self.ai_ctx_btn = QPushButton("AI 上下文预览")
+        self.ai_ctx_btn.setToolTip("查看日报 AI 点评时实际发送给模型的本地上下文")
+        self.ai_ctx_btn.clicked.connect(self._preview_ai_context)
+        bar.addWidget(self.ai_ctx_btn)
         root.addLayout(bar)
 
         self.summary_label = QLabel("")
@@ -272,3 +339,6 @@ class DataCenterTab(QWidget):
         self.sync_btn.setEnabled(True)
         self.sync_btn.setText("同步东财板块")
         self._thread = None
+
+    def _preview_ai_context(self):
+        AIContextDialog(self.db, self).exec_()

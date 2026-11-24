@@ -32,7 +32,7 @@ DEFAULT_BASE_URL = "https://ark.cn-beijing.volces.com/api/v3"
 DEFAULT_MODEL = "doubao-seed-1-6-250615"
 DEFAULT_MAX_TOKENS = 900
 DEFAULT_TIMEOUT = 90
-MAX_BRIEF_CHARS = 4000
+MAX_BRIEF_CHARS = 8000
 
 # settings 键名
 K_ENABLED = "ai_enabled"
@@ -111,15 +111,12 @@ class AIConfig:
 # ---------------------------------------------------------------------------
 SYSTEM_PROMPT = """你是一名 A 股短线交易助手，负责为用户写「每日选股日报」的点评部分。
 
-【用户的策略体系，只能用这套逻辑解读，不要臆造别的策略】
-1) B1海选（一层粗筛）：白线=EMA(EMA(收盘,10),10) 位于 黄线=(MA14+MA28+MA57+MA114)/4 之上，
-   且 KDJ(9,3,3) 的 J 值 < 13。本质是「主力不在成本区之下 + 短期超卖」的海选网，
-   条件刻意放宽，所以普跌日命中数会膨胀到数百只，命中数本身不代表都是好票。
-2) B2普通 / B2灾后重建：B1 次日的确认信号（放量起涨），个股层面才谈得上买点确认。
-3) 砖型图翻红：底部结构转强；单针下30：长下影超卖形态。两者是形态类辅助策略。
-4) B1十张图（二层精筛）：对一层候选做 DNA 骨架比对（9 个「经典B1缩量回踩」模具）
-   再加微观规则加减分，综合分 ≥80 才通过，是最严的一层。
-   买点定级：SB1核心买点 强于 B1底仓买点。
+【数据说明书（重要）】
+- 用户消息里的【策略卡】直接来自用户本地策略库，含策略定位、说明书与公式。
+  解读策略时**只能以策略卡原文为准**，不要套用你记忆里的其他交易流派。
+- 策略卡带版本号：同一策略不同版本逻辑可能不同，按本次给出的版本理解。
+- 个股后面的「行业｜概念」来自本地板块库，是客观标签，不要改写成别的说法。
+- 一层粗筛条件刻意放宽，普跌日命中数百只属正常，命中数本身不代表都是好票。
 
 【写作要求】
 - 中文，纯文本，禁止 Markdown 语法（不要 #、*、-、表格、代码块），每行不超过 40 个汉字。
@@ -130,101 +127,24 @@ SYSTEM_PROMPT = """你是一名 A 股短线交易助手，负责为用户写「�
   中间若干行：3~5 只重点标的，格式「代码 名称：一句话理由」，优先级为
       二层通过 > 出现在【跨策略共振】名单里的 > 单一策略大量命中里的代表；
   最后 1 行：一句风险提示（例如海选口径偏宽、需次日确认）。
-- 只使用用户给出的数字和标的，**不得编造**任何代码、价格、指标、行业消息。
-  数据不足时少写，不要凑。
+- 只使用上文提供的代码、价格、指标、行业与概念，**不得编造**任何标的、数字或消息。
+  上下文里没有的股票代码一律不许出现；数据不足时少写，不要凑。
+- 提到板块轮动时，只能引用给出的「行业分布」，不要自行补充行业逻辑。
 - 不给具体买卖点位、不承诺收益、不推荐仓位。"""
 
 
 # ---------------------------------------------------------------------------
 #  数据摘要（喂给模型的上下文）
 # ---------------------------------------------------------------------------
-def _brief_line_for_hit(row, layer):
-    code = row.get("code") or ""
-    name = row.get("name") or ""
-    # 二层但没打分（个别策略执行失败时仍会入库）→ 退回普通写法，避免出现「综合- 骨架-」
-    if layer == 2 and row.get("final_score") is not None:
-        return (f"  {code} {name} 综合{_num(row.get('final_score'), 1)} "
-                f"骨架{_num(row.get('dtw_score'), 1)} "
-                f"{row.get('buy_level') or '-'} "
-                f"模具={row.get('matched_template') or '-'}")
-    return (f"  {code} {name} 收{_num(row.get('price'), 2)} "
-            f"{_pct(row.get('pct'))}")
+def build_brief(rep, max_per_strategy=8, breadth=None, db=None):
+    """把日报结果压成上下文文本。
 
-
-def _overlaps(rep, limit=10):
-    """跨策略共振：同一只票被 ≥2 个策略命中（含一/二层）。"""
-    seen = {}
-    for s in (rep.get("sections") or []):
-        strat = s.get("strategy") or "?"
-        for row in (s.get("rows") or []):
-            code = row.get("code")
-            if not code:
-                continue
-            d = seen.setdefault(code, {"name": row.get("name") or "", "strats": []})
-            if strat not in d["strats"]:
-                d["strats"].append(strat)
-    items = [(c, v) for c, v in seen.items() if len(v["strats"]) >= 2]
-    items.sort(key=lambda kv: -len(kv[1]["strats"]))
-    return items[:limit]
-
-
-def _num(v, nd=2):
-    try:
-        return f"{float(v):.{nd}f}"
-    except (TypeError, ValueError):
-        return "-"
-
-
-def _pct(v):
-    try:
-        return f"{float(v):+.2f}%"
-    except (TypeError, ValueError):
-        return "-"
-
-
-def build_brief(rep, max_per_strategy=8, breadth=None):
-    """把 build_daily_report 的结果压成一段紧凑文本（控制字数）。"""
-    rep = rep or {}
-    st = rep.get("stats") or {}
-    day = rep.get("day") or datetime.date.today().isoformat()
-    lines = [f"日期：{day}"]
-
-    if breadth:
-        lines.append(
-            f"市场宽度：上涨 {breadth.get('up', 0)} 家 / 下跌 {breadth.get('down', 0)} 家"
-            f" / 平均 {_pct(breadth.get('avg_pct'))}（覆盖 {breadth.get('total', 0)} 只）")
-
-    lines.append(
-        f"命中合计：{st.get('total', 0)} 只（一层 {st.get('layer1', 0)} / "
-        f"二层 {st.get('layer2', 0)}），策略数 {st.get('strategies', 0)}")
-    if st.get("watch_new"):
-        lines.append(f"当日自动进观察池：{st['watch_new']} 只")
-
-    for layer, label in ((2, "二层精筛"), (1, "一层粗筛")):
-        part = [s for s in (rep.get("sections") or []) if s.get("layer") == layer]
-        if not part:
-            continue
-        lines.append("")
-        lines.append(f"【{label}】")
-        for s in part:
-            lines.append(f"{s.get('strategy')}：{s.get('count')} 只"
-                         + (f"（列前 {min(max_per_strategy, s.get('count', 0))} 只）"
-                            if s.get("count", 0) > max_per_strategy else ""))
-            for row in (s.get("rows") or [])[:max_per_strategy]:
-                lines.append(_brief_line_for_hit(row, layer))
-
-    # 跨策略共振：比单个策略的命中更有信息量
-    ov = _overlaps(rep)
-    if ov:
-        lines.append("")
-        lines.append("【跨策略共振】（同一只票被多个策略同时命中，优先级更高）")
-        for code, v in ov:
-            lines.append(f"  {code} {v['name']}：{'、'.join(v['strats'])}")
-
-    text = "\n".join(lines)
-    if len(text) > MAX_BRIEF_CHARS:
-        text = text[:MAX_BRIEF_CHARS] + "\n……（数据过长已截断）"
-    return text
+    传入 db 时会额外拼入「策略卡」「个股行业/概念」「一层行业分布」；
+    不传 db 则退化为纯命中清单（便于离线单测）。
+    """
+    from ai_context import build_context
+    return build_context(db, rep, max_per_strategy=max_per_strategy,
+                         breadth=breadth, max_chars=MAX_BRIEF_CHARS)
 
 
 # ---------------------------------------------------------------------------
@@ -319,9 +239,13 @@ def _tidy(text):
     return "\n".join(out)
 
 
-def summarize(rep, cfg, max_per_strategy=8, breadth=None):
-    """生成 AI 点评。返回 (ok, 文本或错误说明, 附加信息)。"""
-    brief = build_brief(rep, max_per_strategy=max_per_strategy, breadth=breadth)
+def summarize(rep, cfg, max_per_strategy=8, breadth=None, db=None):
+    """生成 AI 点评。返回 (ok, 文本或错误说明, 附加信息)。
+
+    db 用于装配策略卡与个股板块档案；不传时退化为纯命中清单。
+    """
+    brief = build_brief(rep, max_per_strategy=max_per_strategy,
+                        breadth=breadth, db=db)
     system = SYSTEM_PROMPT
     if cfg.extra_prompt:
         system += "\n\n【用户的额外要求】\n" + cfg.extra_prompt

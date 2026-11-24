@@ -1203,7 +1203,8 @@ class ScanCenter(QWidget):
                 else:
                     self.daily_log_line.emit(f"  AI 生成点评中（{ai_cfg.model}）…")
                     try:
-                        ok, text, info = ai_summary.summarize(rep, ai_cfg)
+                        ok, text, info = ai_summary.summarize(
+                            rep, ai_cfg, db=getattr(self, "db", None))
                     except Exception as e:  # noqa: BLE001
                         ok, text, info = False, f"调用异常: {e}", {}
                     if ok and text:
