@@ -819,6 +819,177 @@ class Database:
                 "WHERE strategy_id=?", (strategy_id,)).fetchone()
         return row["v"] or 1
 
+    # ------------------------------------------------------ 策略导入/导出（v0.10.5）
+    # 导出字段：只带"策略本身"，不含回测统计（那是本地历史推出来的，换机器没意义）
+    STRATEGY_EXPORT_FIELDS = (
+        "id", "code", "name", "kind", "formula", "conditions", "description",
+        "enabled", "scan_mode", "level", "tags", "tdx_alias",
+        "parent_strategy_id", "parent_strategy_ids", "created_at", "updated_at",
+    )
+
+    def export_strategies(self):
+        """导出全部策略（用于策略迁移）。"""
+        cols = ", ".join(self.STRATEGY_EXPORT_FIELDS)
+        with self._cursor() as cur:
+            rows = cur.execute(f"SELECT {cols} FROM strategies ORDER BY id").fetchall()
+        return [dict(r) for r in rows]
+
+    def export_strategy_versions(self):
+        """导出全部策略的历史版本。"""
+        with self._cursor() as cur:
+            rows = cur.execute(
+                "SELECT strategy_id, code, version, name, kind, formula, description, "
+                "scan_mode, created_at FROM strategy_versions ORDER BY strategy_id, version"
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def import_strategy_bundle(self, bundle, mode="merge"):
+        """导入策略包（v0.10.5）。
+
+        mode:
+            merge   —— 按 code（优先）或 name 匹配：已存在则更新，不存在则新增；
+            replace —— 先清空本地全部策略与版本，再按包内容重建。
+
+        父策略引用按 id 映射重写（跨机器 id 必然不同，所以先落库再回填）。
+        返回统计 dict：{"added","updated","skipped","versions_added","id_map","errors"}
+        """
+        rows = list(bundle.get("strategies") or [])
+        versions = list(bundle.get("strategy_versions") or [])
+        mode = (mode or "merge").lower()
+
+        def _as_list(v):
+            if v is None:
+                return []
+            if isinstance(v, (list, tuple)):
+                return list(v)
+            try:
+                parsed = json.loads(v)
+                return list(parsed) if isinstance(parsed, list) else []
+            except (ValueError, TypeError):
+                return []
+
+        import datetime as _dt
+        now = _dt.datetime.now().isoformat(timespec="seconds")
+
+        stats = {"added": 0, "updated": 0, "skipped": 0,
+                 "versions_added": 0, "versions_skipped": 0,
+                 "id_map": {}, "errors": []}
+
+        with self._cursor() as cur:
+            if mode == "replace":
+                cur.execute("DELETE FROM strategy_versions")
+                cur.execute("DELETE FROM strategies")
+
+            by_code = {r["code"]: r["id"] for r in
+                       cur.execute("SELECT id, code FROM strategies "
+                                   "WHERE code IS NOT NULL AND code<>''").fetchall()}
+            by_name = {r["name"]: r["id"] for r in
+                       cur.execute("SELECT id, name FROM strategies").fetchall()}
+
+            for rec in rows:
+                name = (rec.get("name") or "").strip()
+                code = (rec.get("code") or "").strip()
+                if not name:
+                    stats["skipped"] += 1
+                    stats["errors"].append("跳过一条没有名称的策略")
+                    continue
+
+                old_id = rec.get("id")
+                target = None
+                if code and code in by_code:
+                    target = by_code[code]
+                elif name in by_name:
+                    target = by_name[name]
+
+                fields = {
+                    "name": name,
+                    "kind": rec.get("kind") or "formula",
+                    "formula": rec.get("formula") or "",
+                    "conditions": rec.get("conditions") or "{}",
+                    "description": rec.get("description") or "",
+                    "enabled": 1 if rec.get("enabled") else 0,
+                    "scan_mode": rec.get("scan_mode") or "batch",
+                    "level": int(rec.get("level") or 1),
+                    "tags": rec.get("tags") or "",
+                    "tdx_alias": rec.get("tdx_alias") or "",
+                    "parent_strategy_id": rec.get("parent_strategy_id"),
+                    "parent_strategy_ids": rec.get("parent_strategy_ids") or "[]",
+                }
+                try:
+                    if target:
+                        sets = ", ".join(f"{k}=?" for k in fields)
+                        cur.execute(
+                            f"UPDATE strategies SET {sets}, updated_at=? WHERE id=?",
+                            (*fields.values(), now, target))
+                        stats["updated"] += 1
+                        new_id = target
+                    else:
+                        cols = ", ".join(fields)
+                        marks = ", ".join("?" * len(fields))
+                        cur.execute(
+                            f"INSERT INTO strategies({cols}, code, created_at, updated_at) "
+                            f"VALUES({marks}, ?, ?, ?)",
+                            (*fields.values(), code or None, now, now))
+                        new_id = cur.lastrowid
+                        stats["added"] += 1
+                        if code:
+                            by_code[code] = new_id
+                        by_name[name] = new_id
+                    if old_id is not None:
+                        stats["id_map"][int(old_id)] = new_id
+                except Exception as e:  # noqa: BLE001
+                    stats["skipped"] += 1
+                    stats["errors"].append(f"{name}: {e}")
+
+            # 第二遍：按 id 映射回填父策略引用（跨机器 id 不同）
+            for rec in rows:
+                old_id = rec.get("id")
+                if old_id is None:
+                    continue
+                new_id = stats["id_map"].get(int(old_id))
+                if not new_id:
+                    continue
+                mapped = [stats["id_map"][int(p)]
+                          for p in _as_list(rec.get("parent_strategy_ids"))
+                          if int(p) in stats["id_map"]]
+                old_parent = rec.get("parent_strategy_id")
+                new_parent = stats["id_map"].get(int(old_parent)) if old_parent else None
+                # 老字段（单父策略）在旧库里可能为空：只有一个父策略时补上，
+                # 保证新库里的 legacy 分支也能正确串联
+                if new_parent is None and len(mapped) == 1:
+                    new_parent = mapped[0]
+                cur.execute(
+                    "UPDATE strategies SET parent_strategy_ids=?, parent_strategy_id=? "
+                    "WHERE id=?",
+                    (json.dumps(mapped, ensure_ascii=False), new_parent, new_id))
+
+            # 版本历史（同策略同版本号已存在则跳过）
+            for v in versions:
+                old_sid = v.get("strategy_id")
+                if old_sid is None or int(old_sid) not in stats["id_map"]:
+                    stats["versions_skipped"] += 1     # 策略已删除的孤儿版本
+                    continue
+                sid = stats["id_map"][int(old_sid)]
+                ver = int(v.get("version") or 1)
+                exists = cur.execute(
+                    "SELECT 1 FROM strategy_versions WHERE strategy_id=? AND version=?",
+                    (sid, ver)).fetchone()
+                if exists:
+                    continue
+                cur.execute(
+                    "INSERT INTO strategy_versions(strategy_id,code,version,name,kind,"
+                    "formula,description,scan_mode,created_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                    (sid, v.get("code") or "", ver, v.get("name") or "",
+                     v.get("kind") or "formula", v.get("formula") or "",
+                     v.get("description") or "", v.get("scan_mode") or "batch",
+                     v.get("created_at") or now))
+                stats["versions_added"] += 1
+
+        log.info("策略导入完成（%s）：新增 %d / 更新 %d / 跳过 %d / 版本 %d",
+                 mode, stats["added"], stats["updated"], stats["skipped"],
+                 stats["versions_added"])
+        return stats
+
     # -------------------------------------------------------------- 扫描历史
     def _active_watch_codes(self):
         """当前观察池中"有效"状态（待审核/观察中/已开仓）的股票代码集合。"""

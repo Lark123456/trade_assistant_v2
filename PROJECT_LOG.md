@@ -914,6 +914,31 @@ known_issues:
 
 ## 八、本次更新记录
 
+- **更新日期**：2026-11-24（v0.10.5）
+- **更新原因**：用户确认「不希望策略被上传到 GitHub，但确实有迁移需求」，要求做一键导入/导出；
+  排查中发现 `archive/strategies/**.md`（含逻辑说明书 + 公式原文）**从仓库初始导入起就在
+  公开仓库里**，属于泄露面
+- **更新内容**：
+  - 新增 `strategy_export.py`：一键**导出为单个 JSON**（`strategies` + `strategy_versions` +
+    `dna_templates`（npz→base64）+ 计数与导出时间），`load_bundle()` 做格式/版本校验；
+    `import_templates()` 恢复模具库时把旧文件备份成 `.bak-时间戳`。
+  - `database.py` 新增 `export_strategies()` / `export_strategy_versions()` /
+    `import_strategy_bundle(bundle, mode)`：按 `code`（优先）/`name` 匹配做
+    **合并**或**覆盖**；先落库再按 `旧id→新id` 映射回填 `parent_strategy_ids`
+    与 legacy `parent_strategy_id`（旧库单值字段为空时用唯一父策略补齐），
+    保证跨机器迁移后层级串联不断；孤儿版本（所属策略已删）计入 `versions_skipped`。
+  - `ui/strategy_tab.py` 新增「📤 导出策略」「📥 导入策略」两个按钮：
+    导出弹保存对话框并回报数量；导入先展示备份摘要，再让用户选合并/覆盖，
+    覆盖需二次确认，完成后刷新列表并联动其它页签。
+  - **仓库卫生**：`.gitignore` 增加 `archive/`、`策略备份-*.json`；
+    执行 `git rm -r --cached archive`（本地文件保留），策略归档不再随提交上传。
+  - 新增 `docs/策略迁移与导出导入.md`：策略存放位置、导入导出、换机器完整步骤与注意事项。
+- **验证**：新增 `test_strategy_export.py` **30 项全部通过**（导出结构、全新库导入、
+  公式/别名/层级/节奏/启用状态一致、父策略 id 重映射、重复导入为更新、覆盖导入清空、
+  非法格式与超前版本被拒、DNA 模具往返含旧文件备份）。
+  真实库实测：13 个策略（3 个 DNA + 4 个指标存档）、33 条历史版本、10 个模具，
+  导出 83.3 KB；导入全新库后名称集合/公式/别名/父策略引用全部一致。
+
 - **更新日期**：2026-11-24（v0.10.4）
 - **更新原因**：用户希望「把自动扫描的数据交给 AI 处理，生成基于自己策略的综合日报再推送」
 - **更新内容**：

@@ -4,11 +4,16 @@
 （v0.6.3 起移除可视化条件编辑器，策略表达统一为通达信公式）"""
 from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import (QCheckBox, QComboBox, QDialog, QDoubleSpinBox,
-                             QFormLayout, QHBoxLayout, QLabel, QLineEdit,
-                             QListWidget, QMessageBox, QPlainTextEdit, QPushButton,
-                             QScrollArea, QStackedWidget, QTabWidget, QTableView,
-                             QVBoxLayout, QWidget)
+                             QFileDialog, QFormLayout, QHBoxLayout, QLabel,
+                             QLineEdit, QListWidget, QMessageBox, QPlainTextEdit,
+                             QPushButton, QScrollArea, QStackedWidget, QTabWidget,
+                             QTableView, QVBoxLayout, QWidget)
 
+import datetime
+import pathlib
+
+import config
+import strategy_export
 from formula_explain import format_explain_lines
 from indicators import check_formula
 from strategy_presets import PRESET_INDICATORS, PRESET_STRATEGIES
@@ -655,6 +660,18 @@ class StrategyTab(QWidget):
         dna_btn.clicked.connect(self._open_dna_builder)
         refresh_btn = QPushButton("刷新")
         refresh_btn.clicked.connect(self._load)
+        # v0.10.5：策略迁移（一键导出/导入，不含任何密钥）
+        exp_btn = QPushButton("📤 导出策略")
+        exp_btn.setToolTip(
+            "把全部策略（公式/说明书/层级/父策略/通达信别名）+ 历史版本 + DNA 模具库\n"
+            "导出成一个 JSON 文件，用于换机器迁移。\n"
+            "不含行情缓存、扫描历史、观察池和任何密钥。")
+        exp_btn.clicked.connect(self._export_strategies)
+        imp_btn = QPushButton("📥 导入策略")
+        imp_btn.setToolTip(
+            "从导出的 JSON 文件恢复策略：可按策略编号合并，或清空后覆盖导入。\n"
+            "父策略引用会自动重映射，可安全导入到新机器。")
+        imp_btn.clicked.connect(self._import_strategies)
         diag_btn = QPushButton("🔍 单票诊断")
         diag_btn.setToolTip("选一只股票逐条核对公式每个条件的数值与通过/不通过")
         diag_btn.clicked.connect(self._diagnose)
@@ -677,6 +694,7 @@ class StrategyTab(QWidget):
             "（基于该策略的历史信号，独立评估胜率、盈亏比、前瞻收益）")
         self.quick_backtest_btn.clicked.connect(self._quick_backtest)
         for b in (add_btn, edit_btn, toggle_btn, del_btn, dna_btn, refresh_btn,
+                  exp_btn, imp_btn,
                   diag_btn, doc_btn, ver_btn, run_btn, self.quick_backtest_btn):
             bar.addWidget(b)
         bar.addStretch(1)
@@ -765,6 +783,80 @@ class StrategyTab(QWidget):
         self._load()
         if self.on_changed:
             self.on_changed()
+
+    # ------------------------------------------------- 策略导出 / 导入（v0.10.5）
+    def _export_strategies(self):
+        """一键导出：全部策略 + 历史版本 + DNA 模具库 → 单个 JSON 文件。"""
+        default = str(pathlib.Path(config.BASE_DIR) /
+                      f"策略备份-{datetime.date.today():%Y%m%d}.json")
+        path, _ = QFileDialog.getSaveFileName(
+            self, "导出策略", default, "JSON 文件 (*.json)")
+        if not path:
+            return
+        if not path.lower().endswith(".json"):
+            path += ".json"
+        try:
+            bundle = strategy_export.build_bundle(self.db, include_templates=True)
+            strategy_export.save_bundle(bundle, path)
+        except Exception as e:  # noqa: BLE001
+            QMessageBox.critical(self, "导出失败", f"{e}")
+            return
+        c = bundle.get("counts") or {}
+        QMessageBox.information(
+            self, "导出完成",
+            f"已导出到：\n{path}\n\n"
+            f"策略 {c.get('strategies', 0)} 个 · 历史版本 {c.get('strategy_versions', 0)} 条"
+            f" · DNA 模具 {c.get('dna_templates', 0)} 个\n\n"
+            "这个文件就是你的策略配方，请自行保管，不要上传到公开仓库。")
+
+    def _import_strategies(self):
+        """一键导入：读取导出文件 → 选择合并/覆盖 → 落库并刷新。"""
+        path, _ = QFileDialog.getOpenFileName(
+            self, "导入策略", str(config.BASE_DIR), "JSON 文件 (*.json)")
+        if not path:
+            return
+        try:
+            bundle = strategy_export.load_bundle(path)
+        except Exception as e:  # noqa: BLE001
+            QMessageBox.critical(self, "文件无法读取", f"{e}")
+            return
+
+        box = QMessageBox(self)
+        box.setWindowTitle("导入策略")
+        box.setText(strategy_export.summarize(bundle))
+        box.setInformativeText(
+            "合并导入：按策略编号匹配，已有的更新、没有的新增（推荐）\n"
+            "覆盖导入：先清空本地全部策略与历史版本，再按备份重建（不可撤销）")
+        merge_btn = box.addButton("合并导入", QMessageBox.AcceptRole)
+        replace_btn = box.addButton("覆盖导入", QMessageBox.DestructiveRole)
+        box.addButton("取消", QMessageBox.RejectRole)
+        box.exec_()
+        clicked = box.clickedButton()
+        if clicked is merge_btn:
+            mode = "merge"
+        elif clicked is replace_btn:
+            mode = "replace"
+        else:
+            return
+
+        if mode == "replace":
+            ans = QMessageBox.warning(
+                self, "确认覆盖",
+                "覆盖导入会先删除本地全部策略（含历史版本），再按备份重建。\n"
+                "DNA 模具库也会被备份覆盖（旧文件自动备份成 .bak-时间戳）。\n\n"
+                "如果这台机器上有备份里没有的策略，它们会丢失。确定继续吗？",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+            if ans != QMessageBox.Yes:
+                return
+
+        try:
+            report = strategy_export.apply_bundle(self.db, bundle, mode=mode)
+        except Exception as e:  # noqa: BLE001
+            QMessageBox.critical(self, "导入失败", f"{e}")
+            return
+
+        self._refresh_all()
+        QMessageBox.information(self, "导入完成", strategy_export.format_report(report))
 
     # ------------------------------------------------------------ 策略 CRUD
     def _open_dna_builder(self):
