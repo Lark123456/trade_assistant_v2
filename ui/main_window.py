@@ -2,6 +2,7 @@
 """主窗口：页签整合、系统托盘提醒、状态栏。"""
 import datetime
 import logging
+import os
 import pathlib
 
 from PyQt5.QtCore import Qt, QTimer
@@ -95,14 +96,22 @@ class MainWindow(QMainWindow):
         - 当前时间由 QTimer 每秒刷新，自动更新
         """
         base = pathlib.Path(__file__).resolve().parent.parent
+        # 跳过 .venv/.git 等目录：里面上万个 .py 都不是本项目代码，
+        # 遍历它们会让启动多花 5 秒左右
+        skip_dirs = {".venv", ".git", "__pycache__", ".pytest_cache", "logs"}
         newest = datetime.datetime.fromtimestamp(0)
-        for p in base.glob("**/*.py"):
-            try:
-                t = datetime.datetime.fromtimestamp(p.stat().st_mtime)
-                if t > newest:
-                    newest = t
-            except OSError:
-                continue
+        for root, dirs, files in os.walk(base):
+            dirs[:] = [d for d in dirs if d not in skip_dirs]
+            for name in files:
+                if not name.endswith(".py"):
+                    continue
+                p = pathlib.Path(root) / name
+                try:
+                    t = datetime.datetime.fromtimestamp(p.stat().st_mtime)
+                    if t > newest:
+                        newest = t
+                except OSError:
+                    continue
         if newest.year < 2000:  # 兜底：找不到任何 .py 时用当前时间
             newest = datetime.datetime.now()
         ver_text = newest.strftime("%Y-%m-%d %H:%M")
