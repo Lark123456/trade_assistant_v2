@@ -36,3 +36,10 @@ reports/
 e2e_scan_result.txt
 .dhs-workflow.json
 _probe.txt
+
+# 7. 策略内容 —— 属于核心资产，不进公开仓库（v0.10.5）
+#    archive/ 是每个策略的版本归档（含逻辑说明书 + 公式原文）
+#    策略备份-*.json 是「一键导出」生成的迁移包
+archive/
+策略备份-*.json
+*策略备份*.json
