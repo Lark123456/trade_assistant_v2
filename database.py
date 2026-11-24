@@ -92,6 +92,43 @@ CREATE TABLE IF NOT EXISTS stock_list (
     name TEXT,
     market INTEGER
 );
+-- 板块字典（v0.11.0）：行业/概念/地域/自定义，source 区分数据来源
+CREATE TABLE IF NOT EXISTS board (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    board_type      TEXT    NOT NULL,              -- industry / concept / region / custom
+    source          TEXT    NOT NULL,              -- em / ths / tdx / manual
+    source_code     TEXT    NOT NULL,              -- BK0475 / 885xxx / manual:xxx
+    name            TEXT    NOT NULL,
+    stock_count     INTEGER NOT NULL DEFAULT 0,
+    is_active       INTEGER NOT NULL DEFAULT 1,
+    last_synced_at  TEXT,
+    created_at      TEXT,
+    updated_at      TEXT,
+    UNIQUE (source, board_type, source_code)
+);
+CREATE INDEX IF NOT EXISTS idx_board_type ON board (board_type, is_active);
+CREATE INDEX IF NOT EXISTS idx_board_name ON board (name);
+-- 股票-板块映射：一只票 1 个行业、N 个概念
+CREATE TABLE IF NOT EXISTS stock_board (
+    code        TEXT    NOT NULL,
+    board_id    INTEGER NOT NULL,
+    updated_at  TEXT,
+    PRIMARY KEY (code, board_id)
+);
+CREATE INDEX IF NOT EXISTS idx_stock_board_board ON stock_board (board_id);
+-- 板块同步日志：每次同步的成功/失败与增删统计
+CREATE TABLE IF NOT EXISTS board_sync_log (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    source          TEXT NOT NULL,
+    started_at      TEXT,
+    finished_at     TEXT,
+    status          TEXT,                          -- ok / partial / failed
+    boards_ok       INTEGER DEFAULT 0,
+    boards_failed   INTEGER DEFAULT 0,
+    members_added   INTEGER DEFAULT 0,
+    members_removed INTEGER DEFAULT 0,
+    message         TEXT
+);
 CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,
     value TEXT
@@ -373,6 +410,128 @@ class Database:
             cur.execute("INSERT INTO settings(key,value) VALUES(?,?) "
                         "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                         (key, str(value)))
+
+    # ---------------------------------------------------------------- 板块
+    def apply_board_snapshot(self, source, seen, refreshed, deactivate_types=()):
+        """把一次板块同步快照写入 board / stock_board（单事务，失败整体回滚）。
+
+        seen:      [{"board_type", "source_code", "name"}] —— 本次接口返回的全部板块
+        refreshed: [{"board_type", "source_code", "name", "codes": [...]}]
+                   —— 已取到成分、需要整体替换的板块；未包含的板块保留旧成分
+        deactivate_types: 本次完整拉取了板块列表的类型；这些类型里已消失的板块置
+                   is_active=0（不删除，保留历史映射）
+        """
+        import datetime
+        now = datetime.datetime.now().isoformat(timespec="seconds")
+        stats = {"boards_seen": len(seen), "boards_refreshed": 0,
+                 "boards_deactivated": 0, "members_added": 0, "members_removed": 0}
+        seen_keys = {(b["board_type"], b["source_code"]) for b in seen}
+        with self._cursor() as cur:
+            ids = {}
+            for b in seen:
+                cur.execute(
+                    "INSERT INTO board(board_type,source,source_code,name,is_active,"
+                    "created_at,updated_at) VALUES(?,?,?,?,1,?,?) "
+                    "ON CONFLICT(source,board_type,source_code) DO UPDATE SET "
+                    "name=excluded.name, is_active=1, updated_at=excluded.updated_at",
+                    (b["board_type"], source, b["source_code"], b["name"], now, now))
+                row = cur.execute(
+                    "SELECT id FROM board WHERE source=? AND board_type=? AND source_code=?",
+                    (source, b["board_type"], b["source_code"])).fetchone()
+                ids[(b["board_type"], b["source_code"])] = row["id"]
+
+            for b in refreshed:
+                bid = ids.get((b["board_type"], b["source_code"]))
+                if bid is None:
+                    continue
+                old = {r["code"] for r in cur.execute(
+                    "SELECT code FROM stock_board WHERE board_id=?", (bid,)).fetchall()}
+                new = set(b.get("codes") or [])
+                cur.execute("DELETE FROM stock_board WHERE board_id=?", (bid,))
+                cur.executemany(
+                    "INSERT OR IGNORE INTO stock_board(code,board_id,updated_at) "
+                    "VALUES(?,?,?)",
+                    [(c, bid, now) for c in sorted(new)])
+                cur.execute(
+                    "UPDATE board SET stock_count=?, last_synced_at=?, updated_at=? "
+                    "WHERE id=?", (len(new), now, now, bid))
+                stats["boards_refreshed"] += 1
+                stats["members_added"] += len(new - old)
+                stats["members_removed"] += len(old - new)
+
+            for bt in deactivate_types:
+                rows = cur.execute(
+                    "SELECT id, source_code FROM board "
+                    "WHERE source=? AND board_type=? AND is_active=1",
+                    (source, bt)).fetchall()
+                gone = [r["id"] for r in rows
+                        if (bt, r["source_code"]) not in seen_keys]
+                for bid in gone:
+                    cur.execute("UPDATE board SET is_active=0, updated_at=? WHERE id=?",
+                                (now, bid))
+                stats["boards_deactivated"] += len(gone)
+        return stats
+
+    def list_boards(self, source=None, board_type=None, active_only=True):
+        sql = "SELECT * FROM board WHERE 1=1"
+        args = []
+        if source:
+            sql += " AND source=?"
+            args.append(source)
+        if board_type:
+            sql += " AND board_type=?"
+            args.append(board_type)
+        if active_only:
+            sql += " AND is_active=1"
+        sql += " ORDER BY board_type, name"
+        with self._cursor() as cur:
+            rows = cur.execute(sql, args).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_board_members(self, board_id):
+        with self._cursor() as cur:
+            rows = cur.execute(
+                "SELECT code FROM stock_board WHERE board_id=? ORDER BY code",
+                (board_id,)).fetchall()
+        return [r["code"] for r in rows]
+
+    def get_boards_of_stock(self, code):
+        with self._cursor() as cur:
+            rows = cur.execute(
+                "SELECT b.board_type, b.name, b.source FROM stock_board sb "
+                "JOIN board b ON b.id=sb.board_id "
+                "WHERE sb.code=? AND b.is_active=1 "
+                "ORDER BY CASE b.board_type WHEN 'industry' THEN 0 ELSE 1 END, b.name",
+                (code,)).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_board_member_total(self, source=None, board_type=None):
+        sql = ("SELECT COUNT(*) AS c FROM stock_board sb "
+               "JOIN board b ON b.id=sb.board_id WHERE b.is_active=1")
+        args = []
+        if source:
+            sql += " AND b.source=?"
+            args.append(source)
+        if board_type:
+            sql += " AND b.board_type=?"
+            args.append(board_type)
+        with self._cursor() as cur:
+            return int(cur.execute(sql, args).fetchone()["c"])
+
+    def add_board_sync_log(self, source, started_at, status, boards_ok,
+                           boards_failed, members_added, members_removed,
+                           message=""):
+        import datetime
+        now = datetime.datetime.now().isoformat(timespec="seconds")
+        with self._cursor() as cur:
+            cur.execute(
+                "INSERT INTO board_sync_log(source,started_at,finished_at,status,"
+                "boards_ok,boards_failed,members_added,members_removed,message) "
+                "VALUES(?,?,?,?,?,?,?,?,?)",
+                (source, started_at, now, status, int(boards_ok),
+                 int(boards_failed), int(members_added), int(members_removed),
+                 message))
+            return cur.lastrowid
 
     # ---------------------------------------------------------------- 观察池
     def add_watch(self, code, name, market, trigger_indicator="", indicator_params=None,
