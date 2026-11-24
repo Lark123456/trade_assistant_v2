@@ -8,11 +8,12 @@ import pathlib
 from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtGui import QColor, QIcon, QPainter, QPixmap
 from PyQt5.QtWidgets import (QAction, QApplication, QLabel, QMainWindow, QMenu,
-                             QSystemTrayIcon, QTabWidget)
+                             QMessageBox, QSystemTrayIcon, QTabWidget)
 
 from ui.alert_tab import AlertTab
 from ui.backtest_tab import BacktestTab
 from ui.calendar_tab import CalendarTab
+from ui.data_center import DataCenterTab
 from ui.scan_center import ScanCenter
 from ui.strategy_tab import StrategyTab
 from ui.trade_tab import TradeTab
@@ -64,6 +65,8 @@ class MainWindow(QMainWindow):
             on_watch_changed=self.watch_tab._load_watch, parent=self)
         self.trade_tab = TradeTab(db, self)
         self.backtest_tab = BacktestTab(worker, db, parent=self)
+        # v0.11.0：数据中心（板块查看 + 东财手动同步）
+        self.data_center = DataCenterTab(db, parent=self)
         tabs.addTab(self.timing_tab, "🕐 择时")
         tabs.addTab(self.calendar_tab, "📅 行情日历")
         tabs.addTab(self.watch_tab, "👀 观察池")
@@ -71,6 +74,7 @@ class MainWindow(QMainWindow):
         tabs.addTab(self.strategy_tab, "🎯 策略管理")
         tabs.addTab(self.scan_center, "🔍 选股模块")
         tabs.addTab(self.backtest_tab, "📊 策略回测")
+        tabs.addTab(self.data_center, "🗂 数据中心")
         tabs.addTab(self.trade_tab, "📒 交易记录")
         self.setCentralWidget(tabs)
         tabs.setCurrentWidget(self.timing_tab)   # v0.8.6：启动即落在择时页
@@ -214,6 +218,12 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------------ 生命周期
     def closeEvent(self, event):
+        # 板块同步在后台线程里写库，等它写完再关库，避免连接被提前关闭
+        if hasattr(self, "data_center") and self.data_center.is_syncing():
+            QMessageBox.information(self, "同步进行中",
+                                    "板块同步尚未完成，请等待同步结束后再退出。")
+            event.ignore()
+            return
         self.worker.stop()
         self.worker.wait(3000)
         self.db.close()
